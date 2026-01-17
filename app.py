@@ -10,7 +10,6 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "books.sqlite"
-SCHEMA_PATH = BASE_DIR / "schema.sql"
 
 st.set_page_config(
     page_title="Bibliothèque personnelle",
@@ -24,19 +23,30 @@ st.set_page_config(
 def get_conn():
     DATA_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
     return conn
 
 
-def init_schema():
+def init_db():
     conn = get_conn()
-    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
-        conn.executescript(f.read())
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner TEXT,
+            type TEXT,
+            author TEXT,
+            title TEXT,
+            language TEXT,
+            read INTEGER,
+            kept INTEGER,
+            publisher TEXT,
+            UNIQUE(owner, author, title)
+        )
+    """)
     conn.commit()
     conn.close()
 
 
-init_schema()
+init_db()
 
 # ==============================
 # UTILS
@@ -50,16 +60,16 @@ def to_bool(val):
 # ==============================
 
 st.title("📚 Bibliothèque personnelle")
-st.markdown("## 📥 Importer la bibliothèque (format propre)")
+st.markdown("## 📥 Import Excel (format propre)")
 
 uploaded = st.file_uploader(
-    "Importer le fichier Excel (livre_clean.xlsx)",
+    "Importer le fichier livre_clean.xlsx",
     type=["xlsx"]
 )
 
-force = st.checkbox("🔁 Forcer la réimportation (vider la base avant)")
+force = st.checkbox("🔁 Vider la base avant import")
 
-if uploaded and st.button("🚀 Lancer l'import"):
+if uploaded and st.button("🚀 Importer"):
     with st.spinner("Import en cours…"):
         conn = get_conn()
         cur = conn.cursor()
@@ -76,16 +86,13 @@ if uploaded and st.button("🚀 Lancer l'import"):
         }
 
         if not REQUIRED.issubset(df.columns):
-            st.error("❌ Le fichier n'est pas au bon format (colonnes manquantes)")
+            st.error("❌ Mauvais format Excel")
             st.stop()
 
         inserted = 0
 
         for _, row in df.iterrows():
-            title = str(row["titre"]).strip()
-            author = str(row["auteur"]).strip()
-
-            if not title or not author:
+            if not str(row["titre"]).strip():
                 continue
 
             cur.execute("""
@@ -95,12 +102,12 @@ if uploaded and st.button("🚀 Lancer l'import"):
             """, (
                 row["owner"],
                 row["type"],
-                author,
-                title,
-                str(row["langue"]),
+                row["auteur"],
+                row["titre"],
+                row["langue"],
                 to_bool(row["lu"]),
                 to_bool(row["garde"]),
-                str(row["edition"])
+                row["edition"]
             ))
 
             if cur.rowcount > 0:
@@ -109,16 +116,14 @@ if uploaded and st.button("🚀 Lancer l'import"):
         conn.commit()
         conn.close()
 
-    st.success(f"✅ Import terminé : {inserted} livres ajoutés")
+    st.success(f"✅ {inserted} livres importés")
     st.rerun()
 
 st.divider()
 
 # ==============================
-# FILTRES
+# RECHERCHE
 # ==============================
-
-st.markdown("## 🔍 Recherche")
 
 c1, c2, c3 = st.columns(3)
 
@@ -131,15 +136,7 @@ with c2:
 with c3:
     type_ = st.selectbox("Type", ["TOUS", "Livre", "BD"])
 
-# ==============================
-# QUERY
-# ==============================
-
-query = """
-SELECT owner, author, title, publisher, language, type, read, kept
-FROM books
-WHERE 1=1
-"""
+query = "SELECT owner, author, title, publisher, language, type, read, kept FROM books WHERE 1=1"
 params = []
 
 if search:
@@ -160,28 +157,17 @@ conn = get_conn()
 rows = conn.execute(query, params).fetchall()
 conn.close()
 
-# ==============================
-# DISPLAY
-# ==============================
-
 if not rows:
-    st.info("📭 Aucun livre trouvé.")
+    st.info("📭 Aucun livre")
 else:
-    df = pd.DataFrame([dict(r) for r in rows])
-
-    df["read"] = df["read"].apply(lambda x: "✓" if x else "")
-    df["kept"] = df["kept"].apply(lambda x: "✓" if x else "")
-
-    df.columns = [
+    df = pd.DataFrame(rows, columns=[
         "Propriétaire", "Auteur", "Titre",
         "Éditeur", "Langue", "Type",
         "Lu", "Gardé"
-    ]
+    ])
 
-    st.success(f"📚 {len(df)} livre(s)")
-    st.dataframe(
-        df,
-        width="stretch",
-        height=650,
-        hide_index=True
-    )
+    df["Lu"] = df["Lu"].apply(lambda x: "✓" if x else "")
+    df["Gardé"] = df["Gardé"].apply(lambda x: "✓" if x else "")
+
+    st.success(f"📚 {len(df)} livres")
+    st.dataframe(df, use_container_width=True, height=650)
