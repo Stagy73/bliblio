@@ -7,7 +7,10 @@ from pathlib import Path
 # CONFIG
 # ==============================
 
-DB_PATH = Path("data") / "books.sqlite"
+BASE_DIR = Path(__file__).parent
+DATA_DIR = BASE_DIR / "data"
+DB_PATH = DATA_DIR / "books.sqlite"
+SCHEMA_PATH = BASE_DIR / "schema.sql"
 
 st.set_page_config(
     page_title="Bibliothèque personnelle",
@@ -15,16 +18,26 @@ st.set_page_config(
 )
 
 # ==============================
-# DB
+# DB INIT (CLOUD SAFE)
 # ==============================
 
-@st.cache_resource
+def init_db():
+    DATA_DIR.mkdir(exist_ok=True)
+
+    if not DB_PATH.exists():
+        conn = sqlite3.connect(DB_PATH)
+        with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+            conn.executescript(f.read())
+        conn.commit()
+        conn.close()
+
 def get_conn():
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
-conn = get_conn()
+# Initialisation AU DÉMARRAGE
+init_db()
 
 # ==============================
 # UI
@@ -32,7 +45,6 @@ conn = get_conn()
 
 st.title("📚 Bibliothèque personnelle")
 
-# --- Recherche ---
 col1, col2, col3 = st.columns(3)
 
 with col1:
@@ -57,7 +69,7 @@ params = []
 
 if search:
     query += " AND (title LIKE ? OR author LIKE ?)"
-    params.extend([f"%{search}%", f"%{search}%"])
+    params += [f"%{search}%", f"%{search}%"]
 
 if owner != "TOUS":
     query += " AND owner = ?"
@@ -70,14 +82,15 @@ if format_ != "TOUS":
 query += " ORDER BY author, title"
 
 # ==============================
-# EXEC
+# EXEC (THREAD SAFE)
 # ==============================
 
-rows = conn.execute(query, params).fetchall()
+with get_conn() as conn:
+    rows = conn.execute(query, params).fetchall()
 
 if not rows:
     st.warning("Aucun livre trouvé.")
 else:
     df = pd.DataFrame([dict(r) for r in rows])
     st.success(f"{len(df)} livres trouvés")
-    st.dataframe(df, use_container_width=True, height=600)
+    st.dataframe(df, width="stretch", height=600)
