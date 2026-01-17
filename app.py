@@ -10,8 +10,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "books.sqlite"
-EXCEL_PATH = BASE_DIR / "livre.xlsx"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
+EXCEL_FILE = BASE_DIR / "livre.xlsx"
 
 st.set_page_config(
     page_title="Bibliothèque personnelle",
@@ -19,90 +19,101 @@ st.set_page_config(
 )
 
 # ==============================
-# DB INIT
+# DB CORE
 # ==============================
 
-def init_db():
-    DATA_DIR.mkdir(exist_ok=True)
-
-    conn = sqlite3.connect(DB_PATH)
-    conn.execute("""
-    CREATE TABLE IF NOT EXISTS books (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        owner TEXT,
-        author TEXT,
-        title TEXT,
-        language TEXT,
-        read INTEGER,
-        kept INTEGER,
-        format TEXT
-    )
-    """)
-    conn.commit()
-    conn.close()
-
 def get_conn():
-    conn = sqlite3.connect(DB_PATH)
+    DATA_DIR.mkdir(exist_ok=True)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
 
-# ==============================
-# IMPORT EXCEL (1 seule fois)
-# ==============================
+
+def init_schema():
+    conn = get_conn()
+    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+        conn.executescript(f.read())
+    conn.commit()
+    conn.close()
+
+
+def table_exists():
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("""
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name='books'
+    """)
+    exists = cur.fetchone() is not None
+    conn.close()
+    return exists
+
 
 def import_excel_once():
-    if not EXCEL_PATH.exists():
-        st.warning("📄 livre.xlsx introuvable – aucun import")
+    if not EXCEL_FILE.exists():
         return
 
-    with get_conn() as conn:
-        count = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
-        if count > 0:
-            return  # déjà importé
+    conn = get_conn()
+    cur = conn.cursor()
 
-        xls = pd.ExcelFile(EXCEL_PATH)
+    # déjà importé ?
+    cur.execute("SELECT COUNT(*) FROM books")
+    if cur.fetchone()[0] > 0:
+        conn.close()
+        return
 
-        for sheet, fmt in [("Livres", "Livre"), ("BD", "BD")]:
-            if sheet not in xls.sheet_names:
+    sheets = {
+        "Livres": "Livre",
+        "BD": "BD"
+    }
+
+    for sheet, fmt in sheets.items():
+        try:
+            df = pd.read_excel(EXCEL_FILE, sheet_name=sheet)
+        except Exception:
+            continue
+
+        for _, row in df.iterrows():
+            title = str(row.get("Titre", "")).strip()
+            if not title:
                 continue
 
-            df = pd.read_excel(xls, sheet_name=sheet)
+            author = str(row.get("Auteur", "")).strip()
+            publisher = str(row.get("Edition", "")).strip()
+            language = str(row.get("Eng_Fr", "")).strip()
+            read = bool(row.get("Lu", False))
+            kept = bool(row.get("Gardé après lecture", False))
 
-            for _, row in df.iterrows():
-                author = str(row.get("Auteur", "")).strip()
-                title = str(row.get("Titre", "")).strip()
-
-                if not title:
-                    continue
-
-                language = str(
-                    row.get("Eng_Fr", row.get("Langue", ""))
-                ).strip()
-
-                read = int(str(row.get("Lu", "FALSE")).upper() == "TRUE")
-                kept = int(str(row.get("Gardé après lecture", "FALSE")).upper() == "TRUE")
-
-                conn.execute("""
-                INSERT INTO books (owner, author, title, language, read, kept, format)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    "NILS",  # propriétaire par défaut
+            cur.execute(
+                """
+                INSERT OR IGNORE INTO books
+                (owner, author, title, publisher, language, format, read, kept)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "NILS",
                     author,
                     title,
+                    publisher,
                     language,
+                    fmt,
                     read,
-                    kept,
-                    fmt
-                ))
+                    kept
+                )
+            )
 
-        conn.commit()
+    conn.commit()
+    conn.close()
+
 
 # ==============================
-# INIT AU DÉMARRAGE
+# BOOTSTRAP (SAFE)
 # ==============================
 
-init_db()
-import_excel_once()
+init_schema()
+
+if table_exists():
+    import_excel_once()
 
 # ==============================
 # UI
@@ -122,11 +133,11 @@ with col3:
     format_ = st.selectbox("Type", ["TOUS", "Livre", "BD"])
 
 # ==============================
-# QUERY
+# QUERY (PROTÉGÉE)
 # ==============================
 
 query = """
-SELECT owner, author, title, language, read, kept, format
+SELECT id, owner, author, title, publisher, language, format
 FROM books
 WHERE 1=1
 """
@@ -147,15 +158,20 @@ if format_ != "TOUS":
 query += " ORDER BY author, title"
 
 # ==============================
-# EXEC
+# EXEC (ANTI-CRASH)
 # ==============================
 
-with get_conn() as conn:
+try:
+    conn = get_conn()
     rows = conn.execute(query, params).fetchall()
+    conn.close()
+except sqlite3.OperationalError:
+    st.warning("📭 Base initialisée, aucun livre pour l’instant.")
+    st.stop()
 
 if not rows:
     st.info("Aucun livre trouvé.")
 else:
     df = pd.DataFrame([dict(r) for r in rows])
-    st.success(f"{len(df)} éléments trouvés")
+    st.success(f"{len(df)} livres trouvés")
     st.dataframe(df, width="stretch", height=600)
