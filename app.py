@@ -3,6 +3,7 @@ import sqlite3
 import pandas as pd
 from pathlib import Path
 import requests
+import io
 
 # ==============================
 # CONFIG
@@ -50,7 +51,6 @@ init_db()
 def search_book_by_isbn(isbn):
     """Recherche un livre par ISBN via Google Books API"""
     try:
-        # Nettoyer l'ISBN
         isbn_clean = isbn.replace("-", "").replace(" ", "").strip()
         
         # Google Books API
@@ -61,7 +61,6 @@ def search_book_by_isbn(isbn):
             data = response.json()
             if data.get("totalItems", 0) > 0:
                 book = data["items"][0]["volumeInfo"]
-                
                 return {
                     "title": book.get("title", ""),
                     "authors": ", ".join(book.get("authors", [])),
@@ -70,7 +69,7 @@ def search_book_by_isbn(isbn):
                     "isbn": isbn_clean
                 }
         
-        # Essayer OpenLibrary comme fallback
+        # OpenLibrary fallback
         url2 = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn_clean}&format=json&jscmd=data"
         response2 = requests.get(url2, timeout=5)
         
@@ -139,13 +138,160 @@ with st.sidebar:
 # ==============================
 st.title("📚 Ma Bibliothèque")
 
-# Tabs pour différentes fonctionnalités
-tab1, tab2, tab3, tab4 = st.tabs(["➕ Ajout manuel", "📱 Scanner EAN", "🔍 Recherche", "📊 Liste complète"])
+# Tabs
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["📥 Import CSV", "➕ Ajout manuel", "📱 Scanner EAN", "🔍 Recherche", "📊 Liste"])
 
 # ==============================
-# TAB 1 - AJOUT MANUEL
+# TAB 1 - IMPORT CSV
 # ==============================
 with tab1:
+    st.markdown("## 📥 Importer depuis un fichier CSV")
+    
+    st.info("""
+    **Format du CSV attendu :**
+    - Colonnes : `Proprio`, `Format`, `Auteur`, `Titre`, `Langue`, `Editeur`
+    - Séparateur : virgule (`,`)
+    - Encodage : UTF-8
+    """)
+    
+    # Télécharger le template
+    template_csv = """Proprio,Format,Auteur,Titre,Langue,Editeur
+Nils,Livre,Victor Hugo,Les Misérables,Fr,Gallimard
+Axel,BD,Hergé,Tintin au Tibet,Fr,Casterman
+Carole,Livre,Jane Austen,Pride and Prejudice,Eng,Penguin"""
+    
+    st.download_button(
+        label="📥 Télécharger un modèle CSV",
+        data=template_csv.encode('utf-8'),
+        file_name="template_bibliotheque.csv",
+        mime="text/csv"
+    )
+    
+    st.divider()
+    
+    # Upload du fichier
+    uploaded_csv = st.file_uploader("Choisissez votre fichier CSV", type=["csv"])
+    
+    if uploaded_csv:
+        try:
+            # Lire le CSV
+            df = pd.read_csv(uploaded_csv)
+            
+            # Afficher aperçu
+            st.markdown("### 📊 Aperçu des données")
+            st.dataframe(df.head(20), use_container_width=True)
+            st.info(f"📐 {len(df)} lignes détectées")
+            
+            # Vérifier les colonnes
+            required_cols = ["Proprio", "Auteur", "Titre"]
+            missing_cols = [col for col in required_cols if col not in df.columns]
+            
+            if missing_cols:
+                st.error(f"❌ Colonnes manquantes : {', '.join(missing_cols)}")
+                st.write("Colonnes détectées :", list(df.columns))
+            else:
+                st.success("✅ Toutes les colonnes obligatoires sont présentes")
+                
+                # Options d'import
+                col1, col2 = st.columns(2)
+                with col1:
+                    wipe_before = st.checkbox("🗑️ Vider la base avant l'import")
+                with col2:
+                    skip_duplicates = st.checkbox("⏭️ Ignorer les doublons", value=True)
+                
+                # Bouton d'import
+                if st.button("🚀 Importer les données", type="primary", use_container_width=True):
+                    with st.spinner("Import en cours..."):
+                        conn = get_conn()
+                        cur = conn.cursor()
+                        
+                        if wipe_before:
+                            cur.execute("DELETE FROM books")
+                            conn.commit()
+                            st.info("🗑️ Base vidée")
+                        
+                        inserted = 0
+                        skipped = 0
+                        errors = []
+                        
+                        for idx, row in df.iterrows():
+                            try:
+                                # Extraire les valeurs
+                                owner = str(row.get("Proprio", "")).strip()
+                                format_type = str(row.get("Format", "Livre")).strip()
+                                author = str(row.get("Auteur", "")).strip()
+                                title = str(row.get("Titre", "")).strip()
+                                language = str(row.get("Langue", "")).strip()
+                                publisher = str(row.get("Editeur", "")).strip()
+                                isbn = str(row.get("ISBN", "")).strip() if "ISBN" in df.columns else ""
+                                
+                                # Validation
+                                if not owner or owner == "nan":
+                                    skipped += 1
+                                    errors.append(f"Ligne {idx+2}: Propriétaire vide")
+                                    continue
+                                if not author or author == "nan":
+                                    skipped += 1
+                                    errors.append(f"Ligne {idx+2}: Auteur vide")
+                                    continue
+                                if not title or title == "nan":
+                                    skipped += 1
+                                    errors.append(f"Ligne {idx+2}: Titre vide")
+                                    continue
+                                
+                                # Vérifier les doublons si demandé
+                                if skip_duplicates:
+                                    exists = cur.execute("""
+                                        SELECT COUNT(*) FROM books 
+                                        WHERE owner = ? AND author = ? AND title = ?
+                                    """, (owner, author, title)).fetchone()[0]
+                                    
+                                    if exists > 0:
+                                        skipped += 1
+                                        continue
+                                
+                                # Insertion
+                                cur.execute("""
+                                    INSERT INTO books (owner, format, author, title, language, isbn, publisher)
+                                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                                """, (
+                                    owner,
+                                    format_type if format_type != "nan" else "Livre",
+                                    author,
+                                    title,
+                                    language if language != "nan" else "",
+                                    isbn if isbn != "nan" else None,
+                                    publisher if publisher != "nan" else None
+                                ))
+                                inserted += 1
+                                
+                            except Exception as e:
+                                errors.append(f"Ligne {idx+2}: {str(e)}")
+                                skipped += 1
+                        
+                        conn.commit()
+                        conn.close()
+                        
+                        # Résultats
+                        st.success(f"✅ {inserted} livres importés")
+                        if skipped > 0:
+                            st.warning(f"⚠️ {skipped} lignes ignorées")
+                        
+                        if errors:
+                            with st.expander(f"📋 Détails des erreurs ({len(errors)})"):
+                                for err in errors[:50]:
+                                    st.text(err)
+                        
+                        st.rerun()
+        
+        except Exception as e:
+            st.error(f"❌ Erreur lors de la lecture du fichier : {e}")
+            st.info("💡 Assurez-vous que le fichier est au format CSV UTF-8")
+
+# ==============================
+# TAB 2 - AJOUT MANUEL
+# ==============================
+with tab2:
     st.markdown("## ✍️ Ajouter un livre manuellement")
     
     with st.form("add_book_form", clear_on_submit=True):
@@ -184,12 +330,33 @@ with tab1:
                     st.error(f"❌ Erreur : {e}")
 
 # ==============================
-# TAB 2 - SCANNER EAN
+# TAB 3 - SCANNER EAN
 # ==============================
-with tab2:
+with tab3:
     st.markdown("## 📱 Scanner un code-barres EAN/ISBN")
     
-    st.info("💡 **Instructions :** Saisissez le code-barres manuellement ou scannez-le avec votre téléphone")
+    with st.expander("ℹ️ Comment scanner avec ton téléphone ?", expanded=True):
+        st.markdown("""
+        ### 📱 Pourquoi pas de scan direct dans l'app ?
+        
+        **Streamlit ne peut pas accéder directement à ta caméra** pour des raisons de sécurité du navigateur.
+        Il faudrait du JavaScript complexe et ce n'est pas natif dans Streamlit.
+        
+        ### ✅ Solution simple et rapide :
+        
+        1. **Ouvre Google Lens** sur ton téléphone (ou l'appareil photo iPhone)
+        2. **Scanne le code-barres** du livre
+        3. **Copie le code EAN** (les 13 chiffres)
+        4. **Colle-le dans le champ ci-dessous** 👇
+        5. Clique sur "Rechercher"
+        
+        ### 📲 Applications recommandées :
+        - **Google Lens** (Android/iOS) - Gratuit et très bien
+        - **Appareil photo iPhone** (natif, scan automatique)
+        - **Barcode Scanner** (Android)
+        
+        **C'est ultra-rapide** : scan → copie → colle → recherche → ajout ! ⚡
+        """)
     
     # Interface de saisie
     col1, col2 = st.columns([3, 1])
@@ -199,30 +366,11 @@ with tab2:
             "Code EAN / ISBN",
             placeholder="Exemple: 9782070612758",
             key="ean_input",
-            help="Scannez le code-barres avec votre téléphone ou tapez-le"
+            help="Scannez le code avec Google Lens puis collez-le ici"
         )
     
     with col2:
         search_button = st.button("🔍 Rechercher", type="primary", use_container_width=True)
-    
-    # Affichage du HTML pour la caméra (optionnel, sur mobile)
-    with st.expander("📷 Scanner avec la caméra (mobile)", expanded=False):
-        st.markdown("""
-        <div style="text-align: center; padding: 20px;">
-            <p>Pour scanner avec votre téléphone :</p>
-            <ol style="text-align: left;">
-                <li>Utilisez une application de scan de code-barres</li>
-                <li>Scannez le code EAN/ISBN du livre</li>
-                <li>Copiez le code et collez-le dans le champ ci-dessus</li>
-            </ol>
-            <p><strong>Ou utilisez ces applications :</strong></p>
-            <ul style="text-align: left;">
-                <li>Google Lens (Android/iOS)</li>
-                <li>Appareil photo iPhone (natif)</li>
-                <li>Barcode Scanner (Android)</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
     
     # Si un code a été saisi
     if ean_input and search_button:
@@ -232,7 +380,6 @@ with tab2:
             if book_info:
                 st.success("✅ Livre trouvé !")
                 
-                # Afficher les informations
                 st.markdown("### 📖 Informations détectées")
                 
                 col_a, col_b = st.columns(2)
@@ -243,7 +390,7 @@ with tab2:
                     st.text_input("Éditeur", value=book_info["publisher"], key="found_pub", disabled=True)
                     st.text_input("Langue", value=book_info["language"], key="found_lang", disabled=True)
                 
-                # Formulaire pour ajouter à la base
+                # Formulaire pour ajouter
                 with st.form("add_scanned_book"):
                     st.markdown("### ➕ Ajouter à ma bibliothèque")
                     
@@ -285,9 +432,9 @@ with tab2:
                 st.info("💡 Vous pouvez l'ajouter manuellement dans l'onglet 'Ajout manuel'")
 
 # ==============================
-# TAB 3 - RECHERCHE
+# TAB 4 - RECHERCHE
 # ==============================
-with tab3:
+with tab4:
     st.markdown("## 🔍 Rechercher dans la bibliothèque")
     
     c1, c2, c3 = st.columns(3)
@@ -333,9 +480,9 @@ with tab3:
         st.error(f"❌ Erreur : {e}")
 
 # ==============================
-# TAB 4 - LISTE COMPLÈTE
+# TAB 5 - LISTE COMPLÈTE
 # ==============================
-with tab4:
+with tab5:
     st.markdown("## 📊 Liste complète")
     
     try:
@@ -354,7 +501,7 @@ with tab4:
             
             st.success(f"📚 {len(df)} livre(s) dans la bibliothèque")
             
-            # Option d'export
+            # Export CSV
             csv = df.to_csv(index=False).encode('utf-8')
             st.download_button(
                 label="📥 Télécharger en CSV",
