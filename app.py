@@ -9,9 +9,8 @@ from pathlib import Path
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "books.sqlite"
-SCHEMA_PATH = BASE_DIR / "schema.sql"
 
-st.set_page_config("📚 Bibliothèque personnelle", layout="wide")
+st.set_page_config(page_title="📚 Bibliothèque personnelle", layout="wide")
 
 # ==============================
 # DB
@@ -22,8 +21,20 @@ def get_conn():
 
 def init_db():
     conn = get_conn()
-    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
-        conn.executescript(f.read())
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS books (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            owner TEXT,
+            category TEXT,
+            author TEXT,
+            title TEXT,
+            language TEXT,
+            read INTEGER,
+            kept INTEGER,
+            publisher TEXT,
+            UNIQUE(owner, category, author, title)
+        )
+    """)
     conn.commit()
     conn.close()
 
@@ -40,37 +51,46 @@ def clean(v):
 def to_bool(v):
     return clean(v).lower() in ("1", "x", "true", "yes", "oui")
 
+def col(df, name):
+    """Retourne le nom de colonne s’il existe, sinon None"""
+    return name if name in df.columns else None
+
 # ==============================
 # UI – IMPORT
 # ==============================
 st.title("📚 Bibliothèque personnelle")
-st.markdown("## 📥 Import Excel (onglet normalisé uniquement)")
+st.markdown("## 📥 Import du fichier Excel")
 
 uploaded = st.file_uploader(
-    "Uploader le fichier Solde compte.xlsx",
-    type=["xlsx"]
+    "Uploader le fichier Solde compte.xls / xlsx",
+    type=["xls", "xlsx"]
 )
 
 if uploaded:
-    xls = pd.ExcelFile(uploaded)
+    try:
+        xls = pd.ExcelFile(uploaded)
+    except Exception as e:
+        st.error(f"❌ Impossible de lire le fichier Excel : {e}")
+        st.stop()
+
     sheet = st.selectbox("Choisir l’onglet à importer", xls.sheet_names)
+    category = st.selectbox("Type de contenu", ["Livre"])
     wipe = st.checkbox("🗑️ Vider la base avant import")
 
     if st.button("🚀 Importer cet onglet"):
         df = pd.read_excel(xls, sheet_name=sheet)
 
-        REQUIRED = [
-            "Proprio",
-            "Auteur",
-            "Titre",
-            "Eng, Fr",
-            "Lu",
-            "Gardé après lecture",
-            "Edition (scolaires)"
-        ]
+        # colonnes possibles (toutes optionnelles sauf 3)
+        c_owner = col(df, "Proprio")
+        c_author = col(df, "Auteur")
+        c_title = col(df, "Titre")
+        c_lang = col(df, "Eng, Fr")
+        c_read = col(df, "Lu")
+        c_kept = col(df, "Gardé après lecture")
+        c_edit = col(df, "Edition (scolaires)")
 
-        if not set(REQUIRED).issubset(df.columns):
-            st.error("❌ Onglet NON conforme.\nUtilise uniquement l’onglet normalisé.")
+        if not all([c_owner, c_author, c_title]):
+            st.error("❌ Colonnes minimales requises : Proprio / Auteur / Titre")
             st.stop()
 
         conn = get_conn()
@@ -83,9 +103,9 @@ if uploaded:
         inserted = 0
 
         for _, r in df.iterrows():
-            owner = clean(r["Proprio"])
-            author = clean(r["Auteur"])
-            title = clean(r["Titre"])
+            owner = clean(r[c_owner])
+            author = clean(r[c_author])
+            title = clean(r[c_title])
 
             if not owner or not author or not title:
                 continue
@@ -93,16 +113,15 @@ if uploaded:
             cur.execute("""
                 INSERT OR IGNORE INTO books
                 (owner, category, author, title, language, read, kept, publisher)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, 'Livre', ?, ?, ?, ?, ?, ?)
             """, (
                 owner,
-                "Livre",
                 author,
                 title,
-                clean(r["Eng, Fr"]),
-                to_bool(r["Lu"]),
-                to_bool(r["Gardé après lecture"]),
-                clean(r["Edition (scolaires)"])
+                clean(r[c_lang]) if c_lang else "",
+                to_bool(r[c_read]) if c_read else 0,
+                to_bool(r[c_kept]) if c_kept else 0,
+                clean(r[c_edit]) if c_edit else ""
             ))
 
             inserted += cur.rowcount
@@ -110,10 +129,10 @@ if uploaded:
         conn.commit()
         conn.close()
 
-        st.success(f"✅ Import terminé : {inserted} livres ajoutés")
+        st.success(f"✅ Import terminé : {inserted} livre(s) ajoutés")
 
 # ==============================
-# RECHERCHE
+# RECHERCHE & AFFICHAGE
 # ==============================
 st.divider()
 st.markdown("## 🔍 Recherche")
@@ -127,7 +146,7 @@ with c2:
     owner = st.selectbox("Propriétaire", ["TOUS", "Carole", "Nils", "Axel"])
 
 with c3:
-    category = st.selectbox("Type", ["TOUS", "Livre", "BD"])
+    category = st.selectbox("Type", ["TOUS", "Livre"])
 
 query = """
 SELECT owner, category, author, title, language, read, kept, publisher
