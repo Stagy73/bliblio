@@ -2,6 +2,7 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 from pathlib import Path
+import math
 
 # ==============================
 # CONFIG
@@ -18,7 +19,7 @@ st.set_page_config(
 )
 
 # ==============================
-# DB CORE
+# DB
 # ==============================
 
 def get_conn():
@@ -36,44 +37,49 @@ def init_schema():
     conn.close()
 
 
-# ==============================
-# INIT DB (SAFE)
-# ==============================
-
 init_schema()
 
 # ==============================
-# UI – HEADER
+# UTILS
+# ==============================
+
+def to_bool(val):
+    """Convertit proprement Excel → bool"""
+    if val is True:
+        return True
+    if val is False:
+        return False
+    if val is None or (isinstance(val, float) and math.isnan(val)):
+        return False
+    return str(val).strip().lower() in ("true", "1", "yes", "x")
+
+# ==============================
+# UI
 # ==============================
 
 st.title("📚 Bibliothèque personnelle")
 
-# ==============================
-# IMPORT EXCEL (CLOUD SAFE)
-# ==============================
-
 st.markdown("## 📥 Importer la bibliothèque")
 
-uploaded_file = st.file_uploader(
+uploaded = st.file_uploader(
     "Importer le fichier Excel (livre.xlsx)",
     type=["xlsx"]
 )
 
-force_import = st.checkbox("🔁 Forcer la réimportation (vider la base avant)")
+force = st.checkbox("🔁 Forcer la réimportation (vider la base avant)")
 
-if uploaded_file and st.button("🚀 Lancer l'import"):
-    with st.spinner("Import en cours..."):
+if uploaded and st.button("🚀 Lancer l'import"):
+    with st.spinner("Import en cours…"):
         conn = get_conn()
         cur = conn.cursor()
 
-        if force_import:
+        if force:
             cur.execute("DELETE FROM books")
             conn.commit()
 
-        # ⚠️ structure RÉELLE de ton fichier
-        df = pd.read_excel(uploaded_file, sheet_name=0, header=0)
+        df = pd.read_excel(uploaded, header=0)
 
-        # blocs colonnes : CAROLE / NILS / AXEL
+        # blocs colonnes EXACTS du fichier réel
         BLOCKS = {
             "CAROLE": (0, 7),
             "NILS":   (7, 14),
@@ -105,8 +111,8 @@ if uploaded_file and st.button("🚀 Lancer l'import"):
                     str(row["Edition"]).strip(),
                     str(row["Langue"]).strip(),
                     "Livre",
-                    str(row["Lu"]).upper() == "TRUE",
-                    str(row["Garde"]).upper() == "TRUE"
+                    to_bool(row["Lu"]),
+                    to_bool(row["Garde"])
                 ))
                 inserted += 1
 
@@ -119,18 +125,18 @@ if uploaded_file and st.button("🚀 Lancer l'import"):
 st.divider()
 
 # ==============================
-# UI – FILTRES
+# FILTRES
 # ==============================
 
-col1, col2, col3 = st.columns(3)
+c1, c2, c3 = st.columns(3)
 
-with col1:
+with c1:
     search = st.text_input("🔍 Recherche (titre / auteur)")
 
-with col2:
+with c2:
     owner = st.selectbox("Propriétaire", ["TOUS", "CAROLE", "NILS", "AXEL"])
 
-with col3:
+with c3:
     format_ = st.selectbox("Type", ["TOUS", "Livre", "BD"])
 
 # ==============================
@@ -138,7 +144,7 @@ with col3:
 # ==============================
 
 query = """
-SELECT id, owner, author, title, publisher, language, format
+SELECT owner, author, title, publisher, language, format
 FROM books
 WHERE 1=1
 """
@@ -156,11 +162,7 @@ if format_ != "TOUS":
     query += " AND format = ?"
     params.append(format_)
 
-query += " ORDER BY author, title"
-
-# ==============================
-# EXEC
-# ==============================
+query += " ORDER BY owner, author, title"
 
 conn = get_conn()
 rows = conn.execute(query, params).fetchall()
