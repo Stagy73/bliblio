@@ -31,10 +31,14 @@ def get_conn():
 
 def init_schema():
     conn = get_conn()
-    with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
-        conn.executescript(f.read())
-    conn.commit()
-    conn.close()
+    try:
+        with open(SCHEMA_PATH, "r", encoding="utf-8") as f:
+            conn.executescript(f.read())
+        conn.commit()
+    except Exception as e:
+        st.error(f"Erreur lors de l'initialisation du schéma: {e}")
+    finally:
+        conn.close()
 
 
 init_schema()
@@ -61,7 +65,6 @@ def safe_str(val):
 
 def detect_owner_blocks(df):
     """Détecte automatiquement les blocs de colonnes pour chaque propriétaire"""
-    # Chercher les colonnes qui contiennent les noms des propriétaires
     owners = ["CAROLE", "NILS", "AXEL"]
     blocks = {}
     
@@ -73,12 +76,35 @@ def detect_owner_blocks(df):
         for i, col in enumerate(cols):
             if owner in col:
                 # Le bloc commence à cette colonne
-                # On prend les 6 prochaines colonnes (Auteur, Titre, Langue, Lu, Garde, Edition)
                 blocks[owner] = (i, i + 6)
                 st.info(f"✓ {owner} détecté : colonnes {i} à {i+6}")
                 break
     
     return blocks
+
+def get_stats():
+    """Récupère les statistiques de la base de données"""
+    try:
+        conn = get_conn()
+        result = conn.execute("""
+            SELECT 
+                COUNT(*) as total,
+                SUM(CASE WHEN read = 1 THEN 1 ELSE 0 END) as read_count,
+                SUM(CASE WHEN kept = 1 THEN 1 ELSE 0 END) as kept_count
+            FROM books
+        """).fetchone()
+        conn.close()
+        
+        if result:
+            return {
+                "total": result["total"] or 0,
+                "read_count": result["read_count"] or 0,
+                "kept_count": result["kept_count"] or 0
+            }
+        return {"total": 0, "read_count": 0, "kept_count": 0}
+    except Exception as e:
+        st.error(f"Erreur lors de la récupération des statistiques: {e}")
+        return {"total": 0, "read_count": 0, "kept_count": 0}
 
 # ==============================
 # UI
@@ -223,7 +249,7 @@ if uploaded and st.button("🚀 Lancer l'import"):
 
             if errors and debug:
                 with st.expander(f"⚠️ Détails des erreurs ({len(errors)})"):
-                    for err in errors[:50]:  # Afficher max 50 erreurs
+                    for err in errors[:50]:
                         st.text(err)
             
         except Exception as e:
@@ -241,16 +267,9 @@ st.divider()
 # STATISTIQUES
 # ==============================
 
-conn = get_conn()
-stats = conn.execute("""
-    SELECT 
-        COUNT(*) as total,
-        SUM(CASE WHEN read = 1 THEN 1 ELSE 0 END) as read_count,
-        SUM(CASE WHEN kept = 1 THEN 1 ELSE 0 END) as kept_count
-    FROM books
-""").fetchone()
+stats = get_stats()
 
-if stats and stats["total"] > 0:
+if stats["total"] > 0:
     col1, col2, col3 = st.columns(3)
     with col1:
         st.metric("📚 Total", stats["total"])
@@ -259,7 +278,7 @@ if stats and stats["total"] > 0:
     with col3:
         st.metric("⭐ Gardés", stats["kept_count"])
 
-st.divider()
+    st.divider()
 
 # ==============================
 # FILTRES
@@ -282,46 +301,54 @@ with c3:
 # QUERY
 # ==============================
 
-query = """
-SELECT owner, author, title, publisher, language, format, read, kept
-FROM books
-WHERE 1=1
-"""
-params = []
+try:
+    query = """
+    SELECT owner, author, title, publisher, language, format, read, kept
+    FROM books
+    WHERE 1=1
+    """
+    params = []
 
-if search:
-    query += " AND (title LIKE ? OR author LIKE ?)"
-    params += [f"%{search}%", f"%{search}%"]
+    if search:
+        query += " AND (title LIKE ? OR author LIKE ?)"
+        params += [f"%{search}%", f"%{search}%"]
 
-if owner != "TOUS":
-    query += " AND owner = ?"
-    params.append(owner)
+    if owner != "TOUS":
+        query += " AND owner = ?"
+        params.append(owner)
 
-if format_ != "TOUS":
-    query += " AND format = ?"
-    params.append(format_)
+    if format_ != "TOUS":
+        query += " AND format = ?"
+        params.append(format_)
 
-query += " ORDER BY owner, author, title"
+    query += " ORDER BY owner, author, title"
 
-rows = conn.execute(query, params).fetchall()
-conn.close()
+    conn = get_conn()
+    rows = conn.execute(query, params).fetchall()
+    conn.close()
 
-if not rows:
-    st.info("📭 Aucun livre trouvé.")
-else:
-    df_result = pd.DataFrame([dict(r) for r in rows])
-    
-    # Convertir les booléens en texte plus lisible
-    df_result["read"] = df_result["read"].apply(lambda x: "✓" if x else "")
-    df_result["kept"] = df_result["kept"].apply(lambda x: "✓" if x else "")
-    
-    # Renommer les colonnes pour l'affichage
-    df_result.columns = ["Propriétaire", "Auteur", "Titre", "Éditeur", "Langue", "Type", "Lu", "Gardé"]
-    
-    st.success(f"📚 {len(df_result)} livre(s) trouvé(s)")
-    st.dataframe(
-        df_result, 
-        use_container_width=True, 
-        height=600,
-        hide_index=True
-    )
+    if not rows:
+        st.info("📭 Aucun livre trouvé.")
+    else:
+        df_result = pd.DataFrame([dict(r) for r in rows])
+        
+        # Convertir les booléens en texte plus lisible
+        df_result["read"] = df_result["read"].apply(lambda x: "✓" if x else "")
+        df_result["kept"] = df_result["kept"].apply(lambda x: "✓" if x else "")
+        
+        # Renommer les colonnes pour l'affichage
+        df_result.columns = ["Propriétaire", "Auteur", "Titre", "Éditeur", "Langue", "Type", "Lu", "Gardé"]
+        
+        st.success(f"📚 {len(df_result)} livre(s) trouvé(s)")
+        st.dataframe(
+            df_result, 
+            use_container_width=True, 
+            height=600,
+            hide_index=True
+        )
+        
+except Exception as e:
+    st.error(f"❌ Erreur lors de la recherche : {str(e)}")
+    import traceback
+    with st.expander("📋 Détails de l'erreur"):
+        st.code(traceback.format_exc())
