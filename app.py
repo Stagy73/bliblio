@@ -19,19 +19,68 @@ def get_conn():
     DATA_DIR.mkdir(exist_ok=True)
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-def init_db():
+def check_column_exists(conn, table, column):
+    """Vérifie si une colonne existe dans une table"""
+    try:
+        cursor = conn.execute(f"PRAGMA table_info({table})")
+        columns = [row[1] for row in cursor.fetchall()]
+        return column in columns
+    except:
+        return False
+
+def recreate_db():
+    """Recrée complètement la base de données"""
+    if DB_PATH.exists():
+        DB_PATH.unlink()
+    
     conn = get_conn()
     conn.execute("""
-        CREATE TABLE IF NOT EXISTS books (
+        CREATE TABLE books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner TEXT,
-            type TEXT,
-            author TEXT,
-            title TEXT,
-            language TEXT
+            owner TEXT NOT NULL,
+            format TEXT,
+            author TEXT NOT NULL,
+            title TEXT NOT NULL,
+            language TEXT,
+            publisher TEXT,
+            read INTEGER DEFAULT 0,
+            kept INTEGER DEFAULT 0,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
+    conn.close()
+    st.success("✅ Base de données recréée avec succès")
+
+def init_db():
+    """Initialise ou migre la base de données"""
+    conn = get_conn()
+    
+    # Vérifier si la table existe
+    cursor = conn.execute("""
+        SELECT name FROM sqlite_master 
+        WHERE type='table' AND name='books'
+    """)
+    table_exists = cursor.fetchone() is not None
+    
+    if not table_exists:
+        # Créer la table avec le bon schéma
+        conn.execute("""
+            CREATE TABLE books (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                owner TEXT NOT NULL,
+                format TEXT,
+                author TEXT NOT NULL,
+                title TEXT NOT NULL,
+                language TEXT,
+                publisher TEXT,
+                read INTEGER DEFAULT 0,
+                kept INTEGER DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+        conn.commit()
+    
     conn.close()
 
 init_db()
@@ -63,6 +112,37 @@ def find_col(df, keywords):
     return None
 
 # ==============================
+# SIDEBAR - ADMIN
+# ==============================
+with st.sidebar:
+    st.markdown("### ⚙️ Administration")
+    
+    # Statistiques
+    try:
+        conn = get_conn()
+        total = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        conn.close()
+        st.metric("📚 Livres en base", total)
+    except:
+        st.metric("📚 Livres en base", 0)
+    
+    st.divider()
+    
+    # Réinitialisation
+    if st.button("🔄 Réinitialiser la base", type="secondary"):
+        if st.session_state.get('confirm_reset'):
+            recreate_db()
+            st.session_state.confirm_reset = False
+            st.rerun()
+        else:
+            st.session_state.confirm_reset = True
+            st.warning("⚠️ Cliquez à nouveau pour confirmer")
+    
+    if st.session_state.get('confirm_reset') and st.button("❌ Annuler"):
+        st.session_state.confirm_reset = False
+        st.rerun()
+
+# ==============================
 # IMPORT
 # ==============================
 st.title("📚 Bibliothèque personnelle")
@@ -74,7 +154,7 @@ if uploaded:
     try:
         xls = pd.ExcelFile(uploaded)
         sheet = st.selectbox("Onglet", xls.sheet_names)
-        type_ = st.selectbox("Type", ["Livre", "BD"])
+        format_ = st.selectbox("Format", ["Livre", "BD"])
         wipe = st.checkbox("🗑️ Vider la base avant import")
 
         if st.button("🚀 Importer"):
@@ -137,9 +217,9 @@ if uploaded:
 
                         # Insertion
                         cur.execute("""
-                            INSERT INTO books (owner, type, author, title, language)
+                            INSERT INTO books (owner, format, author, title, language)
                             VALUES (?, ?, ?, ?, ?)
-                        """, (owner, type_, author, title, lang))
+                        """, (owner, format_, author, title, lang))
                         inserted += 1
 
                     except Exception as e:
@@ -180,12 +260,14 @@ with c2:
     owner_f = st.selectbox("Propriétaire", ["TOUS", "Axel", "Carole", "Nils"])
 
 with c3:
-    type_f = st.selectbox("Type", ["TOUS", "Livre", "BD"])
+    format_f = st.selectbox("Format", ["TOUS", "Livre", "BD"])
 
 # Construction de la requête
 try:
+    conn = get_conn()
+    
     query = """
-    SELECT owner, type, author, title, language
+    SELECT owner, format, author, title, language
     FROM books
     WHERE 1=1
     """
@@ -199,20 +281,19 @@ try:
         query += " AND owner = ?"
         params.append(owner_f)
 
-    if type_f != "TOUS":
-        query += " AND type = ?"
-        params.append(type_f)
+    if format_f != "TOUS":
+        query += " AND format = ?"
+        params.append(format_f)
 
-    query += " ORDER BY owner, type, author, title"
+    query += " ORDER BY owner, format, author, title"
 
     # Exécution
-    conn = get_conn()
     rows = conn.execute(query, params).fetchall()
     conn.close()
 
     if rows:
         df_result = pd.DataFrame(rows, columns=[
-            "Propriétaire", "Type", "Auteur", "Titre", "Langue"
+            "Propriétaire", "Format", "Auteur", "Titre", "Langue"
         ])
         st.success(f"📚 {len(df_result)} résultat(s)")
         st.dataframe(df_result, use_container_width=True, height=650, hide_index=True)
