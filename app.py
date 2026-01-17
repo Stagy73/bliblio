@@ -6,18 +6,16 @@ from pathlib import Path
 # ==============================
 # CONFIG
 # ==============================
-
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "books.sqlite"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
 
-st.set_page_config(page_title="Bibliothèque personnelle", layout="wide")
+st.set_page_config(page_title="📚 Bibliothèque personnelle", layout="wide")
 
 # ==============================
 # DB
 # ==============================
-
 def get_conn():
     DATA_DIR.mkdir(exist_ok=True)
     return sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -34,14 +32,17 @@ init_db()
 # ==============================
 # UTILS
 # ==============================
+def clean(v):
+    if pd.isna(v):
+        return ""
+    return str(v).strip()
 
 def to_bool(v):
-    return str(v).strip().lower() in ("true", "1", "x", "yes", "oui")
+    return clean(v).lower() in ("1", "x", "true", "yes", "oui")
 
 # ==============================
 # UI – IMPORT
 # ==============================
-
 st.title("📚 Bibliothèque personnelle")
 st.markdown("## 📥 Import du fichier Excel")
 
@@ -58,6 +59,7 @@ if uploaded:
 
     if st.button("🚀 Importer cet onglet"):
         df = pd.read_excel(xls, sheet_name=sheet)
+
         conn = get_conn()
         cur = conn.cursor()
 
@@ -68,29 +70,38 @@ if uploaded:
         inserted = 0
 
         # ==============================
-        # BD
+        # BD  (onglet BD)
+        # Colonnes attendues :
+        # A = Auteur | B = Titre
         # ==============================
         if category == "BD":
             for _, r in df.iterrows():
-                auteur = str(r.iloc[0]).strip()
-                titre = str(r.iloc[1]).strip()
+                auteur = clean(r.iloc[0])
+                titre = clean(r.iloc[1])
+
                 if not auteur or not titre:
                     continue
 
                 cur.execute("""
-                    INSERT INTO books (owner, category, author, title)
+                    INSERT OR IGNORE INTO books
+                    (owner, category, author, title)
                     VALUES (?, ?, ?, ?)
                 """, ("BD", "BD", auteur, titre))
-                inserted += 1
+
+                inserted += cur.rowcount
 
         # ==============================
-        # LIVRES
+        # LIVRES (onglet Livres)
+        # STRUCTURE EXACTE :
+        # CAROLE : Auteur | Titre | Eng,Fr | Lu | Gardé | Edition
+        # NILS   : Auteur | Titre | Eng,Fr
+        # AXEL   : Auteur | Titre | Eng,Fr
         # ==============================
         else:
             blocks = {
                 "CAROLE": (0, 6),
-                "NILS":   (7, 10),
-                "AXEL":   (11, 14)
+                "NILS":   (6, 9),
+                "AXEL":   (9, 12)
             }
 
             for owner, (start, end) in blocks.items():
@@ -102,13 +113,14 @@ if uploaded:
                     sub.columns = ["Auteur", "Titre", "Langue"]
 
                 for _, r in sub.iterrows():
-                    titre = str(r["Titre"]).strip()
-                    auteur = str(r["Auteur"]).strip()
-                    if not titre or not auteur:
+                    auteur = clean(r["Auteur"])
+                    titre = clean(r["Titre"])
+
+                    if not auteur or not titre:
                         continue
 
                     cur.execute("""
-                        INSERT INTO books
+                        INSERT OR IGNORE INTO books
                         (owner, category, author, title, language, read, kept, publisher)
                         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """, (
@@ -116,29 +128,29 @@ if uploaded:
                         "Livre",
                         auteur,
                         titre,
-                        r.get("Langue", ""),
+                        clean(r.get("Langue", "")),
                         to_bool(r.get("Lu", False)),
                         to_bool(r.get("Garde", False)),
-                        r.get("Edition", "")
+                        clean(r.get("Edition", ""))
                     ))
-                    inserted += 1
+
+                    inserted += cur.rowcount
 
         conn.commit()
         conn.close()
 
-        st.success(f"✅ Import terminé : {inserted} lignes importées")
+        st.success(f"✅ Import terminé : {inserted} entrées ajoutées")
 
 st.divider()
 
 # ==============================
 # AFFICHAGE
 # ==============================
-
 conn = get_conn()
 rows = conn.execute("""
     SELECT owner, category, author, title, language, read, kept, publisher
     FROM books
-    ORDER BY owner, category, author
+    ORDER BY owner, category, author, title
 """).fetchall()
 conn.close()
 
