@@ -25,7 +25,7 @@ def init_db():
         CREATE TABLE IF NOT EXISTS books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner TEXT,
-            type TEXT,        -- Livre / BD
+            type TEXT,
             author TEXT,
             title TEXT,
             language TEXT
@@ -60,7 +60,7 @@ def find_col(df, keywords):
     return None
 
 # ==============================
-# UI – IMPORT
+# IMPORT
 # ==============================
 st.title("📚 Bibliothèque personnelle")
 st.markdown("## 📥 Import Excel")
@@ -69,8 +69,8 @@ uploaded = st.file_uploader("Fichier Excel", type=["xlsx"])
 
 if uploaded:
     xls = pd.ExcelFile(uploaded)
-    sheet = st.selectbox("Onglet à importer", xls.sheet_names)
-    type_ = st.selectbox("Type de contenu", ["Livre", "BD"])
+    sheet = st.selectbox("Onglet", xls.sheet_names)
+    type_ = st.selectbox("Type", ["Livre", "BD"])
     wipe = st.checkbox("🗑️ Vider la base avant import")
 
     if st.button("🚀 Importer"):
@@ -84,7 +84,7 @@ if uploaded:
 
         if not col_owner or not col_author or not col_title:
             st.error("❌ Colonnes minimales requises : Proprio / Auteur / Titre")
-            st.write("Colonnes détectées :", df.columns.tolist())
+            st.write(df.columns.tolist())
             st.stop()
 
         conn = get_conn()
@@ -111,8 +111,7 @@ if uploaded:
 
         conn.commit()
         conn.close()
-
-        st.success(f"✅ Import terminé : {inserted} lignes ajoutées")
+        st.success(f"✅ Import terminé : {inserted} lignes")
 
 # ==============================
 # RECHERCHE
