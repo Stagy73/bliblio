@@ -155,17 +155,38 @@ with tab1:
     """)
     
     # Télécharger le template
-    template_csv = """Proprio,Format,Auteur,Titre,Langue,Editeur
+    st.markdown("### 📥 Télécharger un modèle CSV")
+    
+    col_t1, col_t2 = st.columns(2)
+    
+    with col_t1:
+        template_csv = """Proprio,Format,Auteur,Titre,Langue,Editeur
 Nils,Livre,Victor Hugo,Les Misérables,Fr,Gallimard
 Axel,BD,Hergé,Tintin au Tibet,Fr,Casterman
 Carole,Livre,Jane Austen,Pride and Prejudice,Eng,Penguin"""
+        
+        st.download_button(
+            label="📥 Modèle complet (avec Format)",
+            data=template_csv.encode('utf-8'),
+            file_name="template_bibliotheque.csv",
+            mime="text/csv",
+            use_container_width=True
+        )
     
-    st.download_button(
-        label="📥 Télécharger un modèle CSV",
-        data=template_csv.encode('utf-8'),
-        file_name="template_bibliotheque.csv",
-        mime="text/csv"
-    )
+    with col_t2:
+        template_simple = """Proprio,Auteur,Titre,Langue
+Axel,Hergé,Tintin au Tibet,Fr
+Carole,Uderzo & Goscinny,Astérix en Corse,Fr
+Nils,Peyo,Les Schtroumpfs,Fr"""
+        
+        st.download_button(
+            label="📥 Modèle simple (sans Format)",
+            data=template_simple.encode('utf-8'),
+            file_name="template_simple.csv",
+            mime="text/csv",
+            use_container_width=True,
+            help="Utilisez l'option 'Forcer le format' lors de l'import"
+        )
     
     st.divider()
     
@@ -193,11 +214,13 @@ Carole,Livre,Jane Austen,Pride and Prejudice,Eng,Penguin"""
                 st.success("✅ Toutes les colonnes obligatoires sont présentes")
                 
                 # Options d'import
-                col1, col2 = st.columns(2)
+                col1, col2, col3 = st.columns(3)
                 with col1:
                     wipe_before = st.checkbox("🗑️ Vider la base avant l'import")
                 with col2:
                     skip_duplicates = st.checkbox("⏭️ Ignorer les doublons", value=True)
+                with col3:
+                    force_format = st.selectbox("📚 Forcer le format", ["Utiliser le CSV", "Livre", "BD", "Manga", "Comics"])
                 
                 # Bouton d'import
                 if st.button("🚀 Importer les données", type="primary", use_container_width=True):
@@ -218,7 +241,13 @@ Carole,Livre,Jane Austen,Pride and Prejudice,Eng,Penguin"""
                             try:
                                 # Extraire les valeurs
                                 owner = str(row.get("Proprio", "")).strip()
-                                format_type = str(row.get("Format", "Livre")).strip()
+                                
+                                # Utiliser le format forcé ou celui du CSV
+                                if force_format == "Utiliser le CSV":
+                                    format_type = str(row.get("Format", "Livre")).strip()
+                                else:
+                                    format_type = force_format
+                                
                                 author = str(row.get("Auteur", "")).strip()
                                 title = str(row.get("Titre", "")).strip()
                                 language = str(row.get("Langue", "")).strip()
