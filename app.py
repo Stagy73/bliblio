@@ -3,7 +3,6 @@ import sqlite3
 import pandas as pd
 from pathlib import Path
 import requests
-import json
 
 # ==============================
 # CONFIG
@@ -37,7 +36,6 @@ def init_db():
             language TEXT,
             isbn TEXT,
             publisher TEXT,
-            year INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
@@ -68,7 +66,6 @@ def search_book_by_isbn(isbn):
                     "title": book.get("title", ""),
                     "authors": ", ".join(book.get("authors", [])),
                     "publisher": book.get("publisher", ""),
-                    "year": book.get("publishedDate", "")[:4] if book.get("publishedDate") else "",
                     "language": book.get("language", "").upper()[:2],
                     "isbn": isbn_clean
                 }
@@ -86,7 +83,6 @@ def search_book_by_isbn(isbn):
                     "title": book2.get("title", ""),
                     "authors": ", ".join([a.get("name", "") for a in book2.get("authors", [])]),
                     "publisher": ", ".join([p.get("name", "") for p in book2.get("publishers", [])]),
-                    "year": book2.get("publish_date", "")[:4] if book2.get("publish_date") else "",
                     "language": "",
                     "isbn": isbn_clean
                 }
@@ -165,11 +161,7 @@ with tab1:
             language = st.selectbox("Langue", ["Fr", "Eng", "Esp", "Deu", "Autre"], key="manual_lang")
             publisher = st.text_input("Éditeur (optionnel)", key="manual_publisher")
         
-        col3, col4 = st.columns(2)
-        with col3:
-            year = st.number_input("Année (optionnel)", 1900, 2030, 2024, key="manual_year")
-        with col4:
-            isbn = st.text_input("ISBN/EAN (optionnel)", key="manual_isbn")
+        isbn = st.text_input("ISBN/EAN (optionnel)", key="manual_isbn")
         
         submitted = st.form_submit_button("➕ Ajouter le livre", type="primary", use_container_width=True)
         
@@ -180,9 +172,9 @@ with tab1:
                 try:
                     conn = get_conn()
                     conn.execute("""
-                        INSERT INTO books (owner, format, author, title, language, isbn, publisher, year)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (owner, format_type, author, title, language, isbn or None, publisher or None, year if year > 1900 else None))
+                        INSERT INTO books (owner, format, author, title, language, isbn, publisher)
+                        VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """, (owner, format_type, author, title, language, isbn or None, publisher or None))
                     conn.commit()
                     conn.close()
                     
@@ -249,7 +241,7 @@ with tab2:
                     st.text_input("Auteur", value=book_info["authors"], key="found_author", disabled=True)
                 with col_b:
                     st.text_input("Éditeur", value=book_info["publisher"], key="found_pub", disabled=True)
-                    st.text_input("Année", value=book_info["year"], key="found_year", disabled=True)
+                    st.text_input("Langue", value=book_info["language"], key="found_lang", disabled=True)
                 
                 # Formulaire pour ajouter à la base
                 with st.form("add_scanned_book"):
@@ -270,8 +262,8 @@ with tab2:
                         try:
                             conn = get_conn()
                             conn.execute("""
-                                INSERT INTO books (owner, format, author, title, language, isbn, publisher, year)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                INSERT INTO books (owner, format, author, title, language, isbn, publisher)
+                                VALUES (?, ?, ?, ?, ?, ?, ?)
                             """, (
                                 owner_scan,
                                 format_scan,
@@ -279,8 +271,7 @@ with tab2:
                                 book_info["title"],
                                 lang_scan,
                                 book_info["isbn"],
-                                book_info["publisher"],
-                                int(book_info["year"]) if book_info["year"].isdigit() else None
+                                book_info["publisher"]
                             ))
                             conn.commit()
                             conn.close()
@@ -311,7 +302,7 @@ with tab3:
     try:
         conn = get_conn()
         
-        query = "SELECT owner, format, author, title, language, year, publisher FROM books WHERE 1=1"
+        query = "SELECT owner, format, author, title, language, publisher FROM books WHERE 1=1"
         params = []
         
         if search_text:
@@ -332,7 +323,7 @@ with tab3:
         conn.close()
         
         if rows:
-            df = pd.DataFrame(rows, columns=["Proprio", "Format", "Auteur", "Titre", "Langue", "Année", "Éditeur"])
+            df = pd.DataFrame(rows, columns=["Proprio", "Format", "Auteur", "Titre", "Langue", "Éditeur"])
             st.success(f"📚 {len(df)} résultat(s)")
             st.dataframe(df, use_container_width=True, height=500, hide_index=True)
         else:
@@ -350,7 +341,7 @@ with tab4:
     try:
         conn = get_conn()
         rows = conn.execute("""
-            SELECT owner, format, author, title, language, year, publisher, created_at
+            SELECT owner, format, author, title, language, publisher, created_at
             FROM books
             ORDER BY created_at DESC
         """).fetchall()
@@ -358,7 +349,7 @@ with tab4:
         
         if rows:
             df = pd.DataFrame(rows, columns=[
-                "Proprio", "Format", "Auteur", "Titre", "Langue", "Année", "Éditeur", "Ajouté le"
+                "Proprio", "Format", "Auteur", "Titre", "Langue", "Éditeur", "Ajouté le"
             ])
             
             st.success(f"📚 {len(df)} livre(s) dans la bibliothèque")
