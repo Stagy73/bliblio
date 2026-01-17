@@ -11,7 +11,6 @@ BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "books.sqlite"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
-EXCEL_FILE = BASE_DIR / "livre.xlsx"
 
 st.set_page_config(
     page_title="Bibliothèque personnelle",
@@ -37,89 +36,91 @@ def init_schema():
     conn.close()
 
 
-def table_exists():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""
-        SELECT name FROM sqlite_master
-        WHERE type='table' AND name='books'
-    """)
-    exists = cur.fetchone() is not None
-    conn.close()
-    return exists
-
-
-def import_excel_once():
-    if not EXCEL_FILE.exists():
-        return
-
-    conn = get_conn()
-    cur = conn.cursor()
-
-    # déjà importé ?
-    cur.execute("SELECT COUNT(*) FROM books")
-    if cur.fetchone()[0] > 0:
-        conn.close()
-        return
-
-    sheets = {
-        "Livres": "Livre",
-        "BD": "BD"
-    }
-
-    for sheet, fmt in sheets.items():
-        try:
-            df = pd.read_excel(EXCEL_FILE, sheet_name=sheet)
-        except Exception:
-            continue
-
-        for _, row in df.iterrows():
-            title = str(row.get("Titre", "")).strip()
-            if not title:
-                continue
-
-            author = str(row.get("Auteur", "")).strip()
-            publisher = str(row.get("Edition", "")).strip()
-            language = str(row.get("Eng_Fr", "")).strip()
-            read = bool(row.get("Lu", False))
-            kept = bool(row.get("Gardé après lecture", False))
-
-            cur.execute(
-                """
-                INSERT OR IGNORE INTO books
-                (owner, author, title, publisher, language, format, read, kept)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    "NILS",
-                    author,
-                    title,
-                    publisher,
-                    language,
-                    fmt,
-                    read,
-                    kept
-                )
-            )
-
-    conn.commit()
-    conn.close()
-
-
 # ==============================
-# BOOTSTRAP (SAFE)
+# INIT DB (SAFE)
 # ==============================
 
 init_schema()
 
-if table_exists():
-    import_excel_once()
-
 # ==============================
-# UI
+# UI – HEADER
 # ==============================
 
 st.title("📚 Bibliothèque personnelle")
+
+# ==============================
+# IMPORT EXCEL (CLOUD SAFE)
+# ==============================
+
+st.markdown("## 📥 Importer la bibliothèque")
+
+uploaded_file = st.file_uploader(
+    "Importer le fichier Excel (livre.xlsx)",
+    type=["xlsx"]
+)
+
+force_import = st.checkbox("🔁 Forcer la réimportation (vider la base avant)")
+
+if uploaded_file and st.button("🚀 Lancer l'import"):
+    with st.spinner("Import en cours..."):
+        conn = get_conn()
+        cur = conn.cursor()
+
+        if force_import:
+            cur.execute("DELETE FROM books")
+            conn.commit()
+
+        # ⚠️ structure RÉELLE de ton fichier
+        df = pd.read_excel(uploaded_file, sheet_name=0, header=0)
+
+        # blocs colonnes : CAROLE / NILS / AXEL
+        BLOCKS = {
+            "CAROLE": (0, 7),
+            "NILS":   (7, 14),
+            "AXEL":   (14, 21)
+        }
+
+        inserted = 0
+
+        for owner, (start, end) in BLOCKS.items():
+            sub = df.iloc[:, start:end].copy()
+            sub.columns = [
+                "Auteur", "Titre", "Langue",
+                "Lu", "Garde", "Edition", "_"
+            ]
+
+            for _, row in sub.iterrows():
+                title = str(row["Titre"]).strip()
+                if not title or title.lower() == "nan":
+                    continue
+
+                cur.execute("""
+                    INSERT OR IGNORE INTO books
+                    (owner, author, title, publisher, language, format, read, kept)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    owner,
+                    str(row["Auteur"]).strip(),
+                    title,
+                    str(row["Edition"]).strip(),
+                    str(row["Langue"]).strip(),
+                    "Livre",
+                    str(row["Lu"]).upper() == "TRUE",
+                    str(row["Garde"]).upper() == "TRUE"
+                ))
+                inserted += 1
+
+        conn.commit()
+        conn.close()
+
+    st.success(f"✅ Import terminé : {inserted} livres importés")
+    st.rerun()
+
+st.divider()
+
+# ==============================
+# UI – FILTRES
+# ==============================
 
 col1, col2, col3 = st.columns(3)
 
@@ -127,13 +128,13 @@ with col1:
     search = st.text_input("🔍 Recherche (titre / auteur)")
 
 with col2:
-    owner = st.selectbox("Propriétaire", ["TOUS", "NILS", "CAROLE"])
+    owner = st.selectbox("Propriétaire", ["TOUS", "CAROLE", "NILS", "AXEL"])
 
 with col3:
     format_ = st.selectbox("Type", ["TOUS", "Livre", "BD"])
 
 # ==============================
-# QUERY (PROTÉGÉE)
+# QUERY
 # ==============================
 
 query = """
@@ -158,20 +159,16 @@ if format_ != "TOUS":
 query += " ORDER BY author, title"
 
 # ==============================
-# EXEC (ANTI-CRASH)
+# EXEC
 # ==============================
 
-try:
-    conn = get_conn()
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-except sqlite3.OperationalError:
-    st.warning("📭 Base initialisée, aucun livre pour l’instant.")
-    st.stop()
+conn = get_conn()
+rows = conn.execute(query, params).fetchall()
+conn.close()
 
 if not rows:
-    st.info("Aucun livre trouvé.")
+    st.info("📭 Aucun livre trouvé.")
 else:
     df = pd.DataFrame([dict(r) for r in rows])
-    st.success(f"{len(df)} livres trouvés")
+    st.success(f"📚 {len(df)} livres trouvés")
     st.dataframe(df, width="stretch", height=600)
