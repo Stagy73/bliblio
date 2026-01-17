@@ -19,15 +19,6 @@ def get_conn():
     DATA_DIR.mkdir(exist_ok=True)
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-def check_column_exists(conn, table, column):
-    """Vérifie si une colonne existe dans une table"""
-    try:
-        cursor = conn.execute(f"PRAGMA table_info({table})")
-        columns = [row[1] for row in cursor.fetchall()]
-        return column in columns
-    except:
-        return False
-
 def recreate_db():
     """Recrée complètement la base de données"""
     if DB_PATH.exists():
@@ -42,29 +33,20 @@ def recreate_db():
             author TEXT NOT NULL,
             title TEXT NOT NULL,
             language TEXT,
-            publisher TEXT,
-            read INTEGER DEFAULT 0,
-            kept INTEGER DEFAULT 0,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
     conn.close()
-    st.success("✅ Base de données recréée avec succès")
 
 def init_db():
-    """Initialise ou migre la base de données"""
+    """Initialise la base de données"""
     conn = get_conn()
-    
-    # Vérifier si la table existe
     cursor = conn.execute("""
         SELECT name FROM sqlite_master 
         WHERE type='table' AND name='books'
     """)
-    table_exists = cursor.fetchone() is not None
-    
-    if not table_exists:
-        # Créer la table avec le bon schéma
+    if not cursor.fetchone():
         conn.execute("""
             CREATE TABLE books (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -73,14 +55,10 @@ def init_db():
                 author TEXT NOT NULL,
                 title TEXT NOT NULL,
                 language TEXT,
-                publisher TEXT,
-                read INTEGER DEFAULT 0,
-                kept INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
         conn.commit()
-    
     conn.close()
 
 init_db()
@@ -92,47 +70,63 @@ def clean(v):
     """Nettoie une valeur Excel"""
     if pd.isna(v):
         return ""
-    return str(v).replace("\n", " ").strip()
+    s = str(v).replace("\n", " ").strip()
+    if s.lower() == "nan":
+        return ""
+    return s
 
 def normalize_columns(df):
     """Normalise les noms de colonnes"""
     df.columns = (
         df.columns.astype(str)
         .str.replace("\ufeff", "", regex=False)
+        .str.replace("Unnamed:", "Col", regex=False)
         .str.strip()
     )
     return df
 
-def find_col(df, keywords):
-    """Trouve une colonne par mots-clés"""
-    for c in df.columns:
+def find_col_index(df, keywords):
+    """Trouve l'index d'une colonne par mots-clés"""
+    for idx, c in enumerate(df.columns):
+        col_str = str(c).lower()
         for k in keywords:
-            if k.lower() in c.lower():
-                return c
+            if k.lower() in col_str:
+                return idx
     return None
 
 # ==============================
-# SIDEBAR - ADMIN
+# SIDEBAR
 # ==============================
 with st.sidebar:
     st.markdown("### ⚙️ Administration")
     
-    # Statistiques
     try:
         conn = get_conn()
         total = conn.execute("SELECT COUNT(*) FROM books").fetchone()[0]
+        by_owner = conn.execute("""
+            SELECT owner, COUNT(*) as count 
+            FROM books 
+            GROUP BY owner 
+            ORDER BY owner
+        """).fetchall()
         conn.close()
-        st.metric("📚 Livres en base", total)
+        
+        st.metric("📚 Total", total)
+        
+        if by_owner:
+            st.markdown("**Par propriétaire:**")
+            for owner, count in by_owner:
+                st.text(f"{owner}: {count}")
     except:
-        st.metric("📚 Livres en base", 0)
+        st.metric("📚 Total", 0)
     
     st.divider()
     
-    # Réinitialisation
-    if st.button("🔄 Réinitialiser la base", type="secondary"):
+    if st.button("🔄 Réinitialiser la base"):
         if st.session_state.get('confirm_reset'):
             recreate_db()
             st.session_state.confirm_reset = False
+            st.success("✅ Base réinitialisée")
             st.rerun()
         else:
             st.session_state.confirm_reset = True
@@ -153,38 +147,72 @@ uploaded = st.file_uploader("Fichier Excel", type=["xlsx", "xls"])
 if uploaded:
     try:
         xls = pd.ExcelFile(uploaded)
-        sheet = st.selectbox("Onglet", xls.sheet_names)
-        format_ = st.selectbox("Format", ["Livre", "BD"])
-        wipe = st.checkbox("🗑️ Vider la base avant import")
+        
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            sheet = st.selectbox("Onglet", xls.sheet_names)
+        with col2:
+            format_ = st.selectbox("Format", ["Livre", "BD"])
+        with col3:
+            wipe = st.checkbox("🗑️ Vider avant import")
+        
+        # Options avancées
+        with st.expander("⚙️ Options avancées"):
+            skip_rows = st.number_input("Lignes à ignorer au début", 0, 10, 0)
+            debug_mode = st.checkbox("🔍 Mode debug détaillé", value=True)
+        
+        # Charger et afficher les données brutes
+        df_raw = pd.read_excel(xls, sheet_name=sheet, header=skip_rows)
+        df = normalize_columns(df_raw)
+        
+        st.markdown("### 📊 Aperçu du fichier")
+        st.dataframe(df.head(20), use_container_width=True, height=300)
+        
+        st.markdown("### 🔧 Détection des colonnes")
+        
+        # Détection manuelle ou automatique
+        detection_mode = st.radio("Mode", ["Automatique", "Manuel"], horizontal=True)
+        
+        if detection_mode == "Automatique":
+            # Détection automatique
+            col_owner_idx = find_col_index(df, ["proprio", "owner", "propriétaire"])
+            col_author_idx = find_col_index(df, ["auteur", "author"])
+            col_title_idx = find_col_index(df, ["titre", "title"])
+            col_lang_idx = find_col_index(df, ["eng", "fr", "lang", "langue"])
+            
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                st.text(f"Proprio: Col {col_owner_idx}")
+            with c2:
+                st.text(f"Auteur: Col {col_author_idx}")
+            with c3:
+                st.text(f"Titre: Col {col_title_idx}")
+            with c4:
+                st.text(f"Langue: Col {col_lang_idx}")
+        else:
+            # Sélection manuelle
+            c1, c2, c3, c4 = st.columns(4)
+            with c1:
+                col_owner_idx = st.selectbox("Colonne Proprio", range(len(df.columns)), 
+                                            format_func=lambda x: f"{x}: {df.columns[x]}")
+            with c2:
+                col_author_idx = st.selectbox("Colonne Auteur", range(len(df.columns)),
+                                             format_func=lambda x: f"{x}: {df.columns[x]}")
+            with c3:
+                col_title_idx = st.selectbox("Colonne Titre", range(len(df.columns)),
+                                            format_func=lambda x: f"{x}: {df.columns[x]}")
+            with c4:
+                col_lang_idx = st.selectbox("Colonne Langue", [-1] + list(range(len(df.columns))),
+                                           format_func=lambda x: "Aucune" if x == -1 else f"{x}: {df.columns[x]}")
+                if col_lang_idx == -1:
+                    col_lang_idx = None
 
-        if st.button("🚀 Importer"):
+        if st.button("🚀 Importer", type="primary"):
+            if col_owner_idx is None or col_author_idx is None or col_title_idx is None:
+                st.error("❌ Veuillez sélectionner au minimum : Proprio, Auteur et Titre")
+                st.stop()
+            
             with st.spinner("Import en cours..."):
-                # Lire le fichier Excel
-                df = pd.read_excel(xls, sheet_name=sheet)
-                df = normalize_columns(df)
-
-                # Afficher les colonnes pour debug
-                with st.expander("🔍 Colonnes détectées"):
-                    st.write(df.columns.tolist())
-                    st.dataframe(df.head(3))
-
-                # Trouver les colonnes
-                col_owner = find_col(df, ["proprio", "owner", "propriétaire"])
-                col_author = find_col(df, ["auteur", "author"])
-                col_title = find_col(df, ["titre", "title"])
-                col_lang = find_col(df, ["eng", "fr", "lang", "langue"])
-
-                if not col_owner or not col_author or not col_title:
-                    st.error("❌ Colonnes minimales requises : Proprio / Auteur / Titre")
-                    st.write("Colonnes trouvées :", {
-                        "Proprio": col_owner,
-                        "Auteur": col_author,
-                        "Titre": col_title,
-                        "Langue": col_lang
-                    })
-                    st.stop()
-
-                # Connexion DB
                 conn = get_conn()
                 cur = conn.cursor()
 
@@ -195,24 +223,31 @@ if uploaded:
 
                 inserted = 0
                 skipped = 0
+                errors = []
 
-                # Insertion
-                for idx, r in df.iterrows():
+                # Utiliser les indices de colonnes
+                for idx, row in df.iterrows():
                     try:
-                        owner = clean(r[col_owner])
-                        author = clean(r[col_author])
-                        title = clean(r[col_title])
-                        lang = clean(r[col_lang]) if col_lang else ""
+                        owner = clean(row.iloc[col_owner_idx])
+                        author = clean(row.iloc[col_author_idx])
+                        title = clean(row.iloc[col_title_idx])
+                        lang = clean(row.iloc[col_lang_idx]) if col_lang_idx is not None else ""
 
-                        # Vérifier que les champs essentiels sont présents
-                        if not owner or owner.lower() == "nan":
+                        # Validation
+                        if not owner:
                             skipped += 1
+                            if debug_mode:
+                                errors.append(f"Ligne {idx+2}: Proprio vide")
                             continue
-                        if not author or author.lower() == "nan":
+                        if not author:
                             skipped += 1
+                            if debug_mode:
+                                errors.append(f"Ligne {idx+2}: Auteur vide")
                             continue
-                        if not title or title.lower() == "nan":
+                        if not title:
                             skipped += 1
+                            if debug_mode:
+                                errors.append(f"Ligne {idx+2}: Titre vide")
                             continue
 
                         # Insertion
@@ -223,19 +258,21 @@ if uploaded:
                         inserted += 1
 
                     except Exception as e:
-                        st.error(f"Erreur ligne {idx}: {e}")
+                        errors.append(f"Ligne {idx+2}: {str(e)}")
                         skipped += 1
 
                 conn.commit()
                 conn.close()
                 
                 # Résultats
-                col1, col2 = st.columns(2)
-                with col1:
-                    st.success(f"✅ {inserted} livres importés")
-                with col2:
-                    if skipped > 0:
-                        st.warning(f"⚠️ {skipped} lignes ignorées")
+                st.success(f"✅ {inserted} livres importés")
+                if skipped > 0:
+                    st.warning(f"⚠️ {skipped} lignes ignorées")
+                
+                if errors and debug_mode:
+                    with st.expander(f"📋 Détails ({len(errors)} erreurs)"):
+                        for err in errors[:50]:
+                            st.text(err)
                 
                 st.rerun()
                 
@@ -262,7 +299,6 @@ with c2:
 with c3:
     format_f = st.selectbox("Format", ["TOUS", "Livre", "BD"])
 
-# Construction de la requête
 try:
     conn = get_conn()
     
@@ -287,7 +323,6 @@ try:
 
     query += " ORDER BY owner, format, author, title"
 
-    # Exécution
     rows = conn.execute(query, params).fetchall()
     conn.close()
 
@@ -296,12 +331,9 @@ try:
             "Propriétaire", "Format", "Auteur", "Titre", "Langue"
         ])
         st.success(f"📚 {len(df_result)} résultat(s)")
-        st.dataframe(df_result, use_container_width=True, height=650, hide_index=True)
+        st.dataframe(df_result, use_container_width=True, height=500, hide_index=True)
     else:
         st.info("📭 Aucun résultat")
         
 except Exception as e:
-    st.error(f"❌ Erreur de recherche : {e}")
-    import traceback
-    with st.expander("Détails"):
-        st.code(traceback.format_exc())
+    st.error(f"❌ Erreur : {e}")
