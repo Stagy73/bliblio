@@ -10,7 +10,7 @@ BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "books.sqlite"
 
-st.set_page_config(page_title="📚 Bibliothèque personnelle", layout="wide")
+st.set_page_config("📚 Bibliothèque personnelle", layout="wide")
 
 # ==============================
 # DB
@@ -31,8 +31,7 @@ def init_db():
             language TEXT,
             read INTEGER,
             kept INTEGER,
-            publisher TEXT,
-            UNIQUE(owner, category, author, title)
+            publisher TEXT
         )
     """)
     conn.commit()
@@ -51,46 +50,58 @@ def clean(v):
 def to_bool(v):
     return clean(v).lower() in ("1", "x", "true", "yes", "oui")
 
-def col(df, name):
-    """Retourne le nom de colonne s’il existe, sinon None"""
-    return name if name in df.columns else None
+def normalize_columns(df):
+    """ Nettoie TOUTES les entêtes Excel """
+    df.columns = (
+        df.columns
+        .astype(str)
+        .str.replace("\ufeff", "", regex=False)
+        .str.strip()
+    )
+    return df
+
+def find_column(df, possible_names):
+    """ Trouve une colonne même mal nommée """
+    for col in df.columns:
+        for name in possible_names:
+            if name.lower() in col.lower():
+                return col
+    return None
 
 # ==============================
 # UI – IMPORT
 # ==============================
 st.title("📚 Bibliothèque personnelle")
-st.markdown("## 📥 Import du fichier Excel")
+st.markdown("## 📥 Import Excel (tolérant & robuste)")
 
 uploaded = st.file_uploader(
-    "Uploader le fichier Solde compte.xls / xlsx",
-    type=["xls", "xlsx"]
+    "Uploader un fichier Excel (.xlsx)",
+    type=["xlsx"]
 )
 
 if uploaded:
-    try:
-        xls = pd.ExcelFile(uploaded)
-    except Exception as e:
-        st.error(f"❌ Impossible de lire le fichier Excel : {e}")
-        st.stop()
-
-    sheet = st.selectbox("Choisir l’onglet à importer", xls.sheet_names)
-    category = st.selectbox("Type de contenu", ["Livre"])
+    xls = pd.ExcelFile(uploaded)
+    sheet = st.selectbox("Choisir l’onglet", xls.sheet_names)
     wipe = st.checkbox("🗑️ Vider la base avant import")
 
-    if st.button("🚀 Importer cet onglet"):
+    if st.button("🚀 Importer"):
         df = pd.read_excel(xls, sheet_name=sheet)
+        df = normalize_columns(df)
 
-        # colonnes possibles (toutes optionnelles sauf 3)
-        c_owner = col(df, "Proprio")
-        c_author = col(df, "Auteur")
-        c_title = col(df, "Titre")
-        c_lang = col(df, "Eng, Fr")
-        c_read = col(df, "Lu")
-        c_kept = col(df, "Gardé après lecture")
-        c_edit = col(df, "Edition (scolaires)")
+        # 🔍 Détection intelligente des colonnes
+        col_owner = find_column(df, ["proprio", "owner"])
+        col_author = find_column(df, ["auteur", "author"])
+        col_title = find_column(df, ["titre", "title"])
+        col_lang = find_column(df, ["eng", "fr", "lang"])
+        col_read = find_column(df, ["lu", "read"])
+        col_kept = find_column(df, ["gardé", "garde", "kept"])
+        col_pub = find_column(df, ["edition", "éditeur"])
 
-        if not all([c_owner, c_author, c_title]):
-            st.error("❌ Colonnes minimales requises : Proprio / Auteur / Titre")
+        if not col_owner or not col_author or not col_title:
+            st.error(
+                "❌ Colonnes indispensables introuvables\n\n"
+                f"Colonnes détectées : {list(df.columns)}"
+            )
             st.stop()
 
         conn = get_conn()
@@ -103,53 +114,51 @@ if uploaded:
         inserted = 0
 
         for _, r in df.iterrows():
-            owner = clean(r[c_owner])
-            author = clean(r[c_author])
-            title = clean(r[c_title])
+            owner = clean(r[col_owner])
+            author = clean(r[col_author])
+            title = clean(r[col_title])
 
             if not owner or not author or not title:
                 continue
 
             cur.execute("""
-                INSERT OR IGNORE INTO books
+                INSERT INTO books
                 (owner, category, author, title, language, read, kept, publisher)
-                VALUES (?, 'Livre', ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 owner,
+                "Livre",
                 author,
                 title,
-                clean(r[c_lang]) if c_lang else "",
-                to_bool(r[c_read]) if c_read else 0,
-                to_bool(r[c_kept]) if c_kept else 0,
-                clean(r[c_edit]) if c_edit else ""
+                clean(r[col_lang]) if col_lang else "",
+                to_bool(r[col_read]) if col_read else False,
+                to_bool(r[col_kept]) if col_kept else False,
+                clean(r[col_pub]) if col_pub else ""
             ))
 
-            inserted += cur.rowcount
+            inserted += 1
 
         conn.commit()
         conn.close()
 
-        st.success(f"✅ Import terminé : {inserted} livre(s) ajoutés")
+        st.success(f"✅ Import réussi : {inserted} livres")
 
 # ==============================
-# RECHERCHE & AFFICHAGE
+# RECHERCHE / AFFICHAGE
 # ==============================
 st.divider()
 st.markdown("## 🔍 Recherche")
 
-c1, c2, c3 = st.columns(3)
+c1, c2 = st.columns(2)
 
 with c1:
     search = st.text_input("Titre ou Auteur")
 
 with c2:
-    owner = st.selectbox("Propriétaire", ["TOUS", "Carole", "Nils", "Axel"])
-
-with c3:
-    category = st.selectbox("Type", ["TOUS", "Livre"])
+    owner = st.selectbox("Propriétaire", ["TOUS", "Axel", "Carole", "Nils"])
 
 query = """
-SELECT owner, category, author, title, language, read, kept, publisher
+SELECT owner, author, title, language
 FROM books
 WHERE 1=1
 """
@@ -163,10 +172,6 @@ if owner != "TOUS":
     query += " AND owner = ?"
     params.append(owner)
 
-if category != "TOUS":
-    query += " AND category = ?"
-    params.append(category)
-
 query += " ORDER BY owner, author, title"
 
 conn = get_conn()
@@ -174,12 +179,7 @@ rows = conn.execute(query, params).fetchall()
 conn.close()
 
 if rows:
-    df = pd.DataFrame(rows, columns=[
-        "Propriétaire", "Type", "Auteur", "Titre",
-        "Langue", "Lu", "Gardé", "Édition"
-    ])
-    df["Lu"] = df["Lu"].apply(lambda x: "✓" if x else "")
-    df["Gardé"] = df["Gardé"].apply(lambda x: "✓" if x else "")
+    df = pd.DataFrame(rows, columns=["Proprio", "Auteur", "Titre", "Langue"])
     st.dataframe(df, use_container_width=True, height=650)
 else:
     st.info("📭 Aucun livre trouvé")
