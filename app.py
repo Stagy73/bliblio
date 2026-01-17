@@ -2,6 +2,8 @@ import streamlit as st
 import sqlite3
 import pandas as pd
 from pathlib import Path
+import requests
+import json
 
 # ==============================
 # CONFIG
@@ -10,7 +12,11 @@ BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "books.sqlite"
 
-st.set_page_config(page_title="📚 Bibliothèque personnelle", layout="wide")
+st.set_page_config(
+    page_title="📚 Ma Bibliothèque",
+    layout="wide",
+    initial_sidebar_state="expanded"
+)
 
 # ==============================
 # DB
@@ -19,86 +25,83 @@ def get_conn():
     DATA_DIR.mkdir(exist_ok=True)
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
-def recreate_db():
-    """Recrée complètement la base de données"""
-    if DB_PATH.exists():
-        DB_PATH.unlink()
-    
+def init_db():
     conn = get_conn()
     conn.execute("""
-        CREATE TABLE books (
+        CREATE TABLE IF NOT EXISTS books (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             owner TEXT NOT NULL,
             format TEXT,
             author TEXT NOT NULL,
             title TEXT NOT NULL,
             language TEXT,
+            isbn TEXT,
+            publisher TEXT,
+            year INTEGER,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
     conn.commit()
     conn.close()
 
-def init_db():
-    """Initialise la base de données"""
-    conn = get_conn()
-    cursor = conn.execute("""
-        SELECT name FROM sqlite_master 
-        WHERE type='table' AND name='books'
-    """)
-    if not cursor.fetchone():
-        conn.execute("""
-            CREATE TABLE books (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                owner TEXT NOT NULL,
-                format TEXT,
-                author TEXT NOT NULL,
-                title TEXT NOT NULL,
-                language TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
-        conn.commit()
-    conn.close()
-
 init_db()
 
 # ==============================
-# UTILS
+# API - Recherche par ISBN/EAN
 # ==============================
-def clean(v):
-    """Nettoie une valeur Excel"""
-    if pd.isna(v):
-        return ""
-    s = str(v).replace("\n", " ").strip()
-    if s.lower() == "nan":
-        return ""
-    return s
-
-def normalize_columns(df):
-    """Normalise les noms de colonnes"""
-    df.columns = (
-        df.columns.astype(str)
-        .str.replace("\ufeff", "", regex=False)
-        .str.replace("Unnamed:", "Col", regex=False)
-        .str.strip()
-    )
-    return df
-
-def find_col_index(df, keywords):
-    """Trouve l'index d'une colonne par mots-clés"""
-    for idx, c in enumerate(df.columns):
-        col_str = str(c).lower()
-        for k in keywords:
-            if k.lower() in col_str:
-                return idx
-    return None
+def search_book_by_isbn(isbn):
+    """Recherche un livre par ISBN via Google Books API"""
+    try:
+        # Nettoyer l'ISBN
+        isbn_clean = isbn.replace("-", "").replace(" ", "").strip()
+        
+        # Google Books API
+        url = f"https://www.googleapis.com/books/v1/volumes?q=isbn:{isbn_clean}"
+        response = requests.get(url, timeout=5)
+        
+        if response.status_code == 200:
+            data = response.json()
+            if data.get("totalItems", 0) > 0:
+                book = data["items"][0]["volumeInfo"]
+                
+                return {
+                    "title": book.get("title", ""),
+                    "authors": ", ".join(book.get("authors", [])),
+                    "publisher": book.get("publisher", ""),
+                    "year": book.get("publishedDate", "")[:4] if book.get("publishedDate") else "",
+                    "language": book.get("language", "").upper()[:2],
+                    "isbn": isbn_clean
+                }
+        
+        # Essayer OpenLibrary comme fallback
+        url2 = f"https://openlibrary.org/api/books?bibkeys=ISBN:{isbn_clean}&format=json&jscmd=data"
+        response2 = requests.get(url2, timeout=5)
+        
+        if response2.status_code == 200:
+            data2 = response2.json()
+            key = f"ISBN:{isbn_clean}"
+            if key in data2:
+                book2 = data2[key]
+                return {
+                    "title": book2.get("title", ""),
+                    "authors": ", ".join([a.get("name", "") for a in book2.get("authors", [])]),
+                    "publisher": ", ".join([p.get("name", "") for p in book2.get("publishers", [])]),
+                    "year": book2.get("publish_date", "")[:4] if book2.get("publish_date") else "",
+                    "language": "",
+                    "isbn": isbn_clean
+                }
+        
+        return None
+        
+    except Exception as e:
+        st.error(f"Erreur lors de la recherche : {e}")
+        return None
 
 # ==============================
-# SIDEBAR
+# SIDEBAR - STATS
 # ==============================
 with st.sidebar:
-    st.markdown("### ⚙️ Administration")
+    st.markdown("### 📊 Statistiques")
     
     try:
         conn = get_conn()
@@ -107,7 +110,7 @@ with st.sidebar:
             SELECT owner, COUNT(*) as count 
             FROM books 
             GROUP BY owner 
-            ORDER BY owner
+            ORDER BY count DESC
         """).fetchall()
         conn.close()
         
@@ -122,218 +125,256 @@ with st.sidebar:
     
     st.divider()
     
+    st.markdown("### ⚙️ Actions")
     if st.button("🔄 Réinitialiser la base"):
         if st.session_state.get('confirm_reset'):
-            recreate_db()
+            if DB_PATH.exists():
+                DB_PATH.unlink()
+            init_db()
             st.session_state.confirm_reset = False
             st.success("✅ Base réinitialisée")
             st.rerun()
         else:
             st.session_state.confirm_reset = True
-            st.warning("⚠️ Cliquez à nouveau pour confirmer")
+            st.warning("⚠️ Cliquez encore pour confirmer")
+
+# ==============================
+# MAIN
+# ==============================
+st.title("📚 Ma Bibliothèque")
+
+# Tabs pour différentes fonctionnalités
+tab1, tab2, tab3, tab4 = st.tabs(["➕ Ajout manuel", "📱 Scanner EAN", "🔍 Recherche", "📊 Liste complète"])
+
+# ==============================
+# TAB 1 - AJOUT MANUEL
+# ==============================
+with tab1:
+    st.markdown("## ✍️ Ajouter un livre manuellement")
     
-    if st.session_state.get('confirm_reset') and st.button("❌ Annuler"):
-        st.session_state.confirm_reset = False
-        st.rerun()
-
-# ==============================
-# IMPORT
-# ==============================
-st.title("📚 Bibliothèque personnelle")
-st.markdown("## 📥 Import Excel")
-
-uploaded = st.file_uploader("Fichier Excel", type=["xlsx", "xls"])
-
-if uploaded:
-    try:
-        xls = pd.ExcelFile(uploaded)
+    with st.form("add_book_form", clear_on_submit=True):
+        col1, col2 = st.columns(2)
         
-        col1, col2, col3 = st.columns(3)
         with col1:
-            sheet = st.selectbox("Onglet", xls.sheet_names)
+            owner = st.selectbox("Propriétaire *", ["Axel", "Carole", "Nils"], key="manual_owner")
+            title = st.text_input("Titre *", key="manual_title")
+            author = st.text_input("Auteur *", key="manual_author")
+        
         with col2:
-            format_ = st.selectbox("Format", ["Livre", "BD"])
+            format_type = st.selectbox("Format", ["Livre", "BD", "Manga", "Comics"], key="manual_format")
+            language = st.selectbox("Langue", ["Fr", "Eng", "Esp", "Deu", "Autre"], key="manual_lang")
+            publisher = st.text_input("Éditeur (optionnel)", key="manual_publisher")
+        
+        col3, col4 = st.columns(2)
         with col3:
-            wipe = st.checkbox("🗑️ Vider avant import")
+            year = st.number_input("Année (optionnel)", 1900, 2030, 2024, key="manual_year")
+        with col4:
+            isbn = st.text_input("ISBN/EAN (optionnel)", key="manual_isbn")
         
-        # Options avancées
-        with st.expander("⚙️ Options avancées"):
-            skip_rows = st.number_input("Lignes à ignorer au début", 0, 10, 0)
-            debug_mode = st.checkbox("🔍 Mode debug détaillé", value=True)
+        submitted = st.form_submit_button("➕ Ajouter le livre", type="primary", use_container_width=True)
         
-        # Charger et afficher les données brutes
-        df_raw = pd.read_excel(xls, sheet_name=sheet, header=skip_rows)
-        df = normalize_columns(df_raw)
-        
-        st.markdown("### 📊 Aperçu du fichier")
-        st.dataframe(df.head(20), use_container_width=True, height=300)
-        
-        st.markdown("### 🔧 Détection des colonnes")
-        
-        # Détection manuelle ou automatique
-        detection_mode = st.radio("Mode", ["Automatique", "Manuel"], horizontal=True)
-        
-        if detection_mode == "Automatique":
-            # Détection automatique
-            col_owner_idx = find_col_index(df, ["proprio", "owner", "propriétaire"])
-            col_author_idx = find_col_index(df, ["auteur", "author"])
-            col_title_idx = find_col_index(df, ["titre", "title"])
-            col_lang_idx = find_col_index(df, ["eng", "fr", "lang", "langue"])
-            
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                st.text(f"Proprio: Col {col_owner_idx}")
-            with c2:
-                st.text(f"Auteur: Col {col_author_idx}")
-            with c3:
-                st.text(f"Titre: Col {col_title_idx}")
-            with c4:
-                st.text(f"Langue: Col {col_lang_idx}")
-        else:
-            # Sélection manuelle
-            c1, c2, c3, c4 = st.columns(4)
-            with c1:
-                col_owner_idx = st.selectbox("Colonne Proprio", range(len(df.columns)), 
-                                            format_func=lambda x: f"{x}: {df.columns[x]}")
-            with c2:
-                col_author_idx = st.selectbox("Colonne Auteur", range(len(df.columns)),
-                                             format_func=lambda x: f"{x}: {df.columns[x]}")
-            with c3:
-                col_title_idx = st.selectbox("Colonne Titre", range(len(df.columns)),
-                                            format_func=lambda x: f"{x}: {df.columns[x]}")
-            with c4:
-                col_lang_idx = st.selectbox("Colonne Langue", [-1] + list(range(len(df.columns))),
-                                           format_func=lambda x: "Aucune" if x == -1 else f"{x}: {df.columns[x]}")
-                if col_lang_idx == -1:
-                    col_lang_idx = None
-
-        if st.button("🚀 Importer", type="primary"):
-            if col_owner_idx is None or col_author_idx is None or col_title_idx is None:
-                st.error("❌ Veuillez sélectionner au minimum : Proprio, Auteur et Titre")
-                st.stop()
-            
-            with st.spinner("Import en cours..."):
-                conn = get_conn()
-                cur = conn.cursor()
-
-                if wipe:
-                    cur.execute("DELETE FROM books")
+        if submitted:
+            if not title or not author:
+                st.error("❌ Le titre et l'auteur sont obligatoires !")
+            else:
+                try:
+                    conn = get_conn()
+                    conn.execute("""
+                        INSERT INTO books (owner, format, author, title, language, isbn, publisher, year)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """, (owner, format_type, author, title, language, isbn or None, publisher or None, year if year > 1900 else None))
                     conn.commit()
-                    st.info("🗑️ Base vidée")
+                    conn.close()
+                    
+                    st.success(f"✅ Livre ajouté : {title} par {author}")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Erreur : {e}")
 
-                inserted = 0
-                skipped = 0
-                errors = []
-
-                # Utiliser les indices de colonnes
-                for idx, row in df.iterrows():
-                    try:
-                        owner = clean(row.iloc[col_owner_idx])
-                        author = clean(row.iloc[col_author_idx])
-                        title = clean(row.iloc[col_title_idx])
-                        lang = clean(row.iloc[col_lang_idx]) if col_lang_idx is not None else ""
-
-                        # Validation
-                        if not owner:
-                            skipped += 1
-                            if debug_mode:
-                                errors.append(f"Ligne {idx+2}: Proprio vide")
-                            continue
-                        if not author:
-                            skipped += 1
-                            if debug_mode:
-                                errors.append(f"Ligne {idx+2}: Auteur vide")
-                            continue
-                        if not title:
-                            skipped += 1
-                            if debug_mode:
-                                errors.append(f"Ligne {idx+2}: Titre vide")
-                            continue
-
-                        # Insertion
-                        cur.execute("""
-                            INSERT INTO books (owner, format, author, title, language)
-                            VALUES (?, ?, ?, ?, ?)
-                        """, (owner, format_, author, title, lang))
-                        inserted += 1
-
-                    except Exception as e:
-                        errors.append(f"Ligne {idx+2}: {str(e)}")
-                        skipped += 1
-
-                conn.commit()
-                conn.close()
+# ==============================
+# TAB 2 - SCANNER EAN
+# ==============================
+with tab2:
+    st.markdown("## 📱 Scanner un code-barres EAN/ISBN")
+    
+    st.info("💡 **Instructions :** Saisissez le code-barres manuellement ou scannez-le avec votre téléphone")
+    
+    # Interface de saisie
+    col1, col2 = st.columns([3, 1])
+    
+    with col1:
+        ean_input = st.text_input(
+            "Code EAN / ISBN",
+            placeholder="Exemple: 9782070612758",
+            key="ean_input",
+            help="Scannez le code-barres avec votre téléphone ou tapez-le"
+        )
+    
+    with col2:
+        search_button = st.button("🔍 Rechercher", type="primary", use_container_width=True)
+    
+    # Affichage du HTML pour la caméra (optionnel, sur mobile)
+    with st.expander("📷 Scanner avec la caméra (mobile)", expanded=False):
+        st.markdown("""
+        <div style="text-align: center; padding: 20px;">
+            <p>Pour scanner avec votre téléphone :</p>
+            <ol style="text-align: left;">
+                <li>Utilisez une application de scan de code-barres</li>
+                <li>Scannez le code EAN/ISBN du livre</li>
+                <li>Copiez le code et collez-le dans le champ ci-dessus</li>
+            </ol>
+            <p><strong>Ou utilisez ces applications :</strong></p>
+            <ul style="text-align: left;">
+                <li>Google Lens (Android/iOS)</li>
+                <li>Appareil photo iPhone (natif)</li>
+                <li>Barcode Scanner (Android)</li>
+            </ul>
+        </div>
+        """, unsafe_allow_html=True)
+    
+    # Si un code a été saisi
+    if ean_input and search_button:
+        with st.spinner("🔍 Recherche en cours..."):
+            book_info = search_book_by_isbn(ean_input)
+            
+            if book_info:
+                st.success("✅ Livre trouvé !")
                 
-                # Résultats
-                st.success(f"✅ {inserted} livres importés")
-                if skipped > 0:
-                    st.warning(f"⚠️ {skipped} lignes ignorées")
+                # Afficher les informations
+                st.markdown("### 📖 Informations détectées")
                 
-                if errors and debug_mode:
-                    with st.expander(f"📋 Détails ({len(errors)} erreurs)"):
-                        for err in errors[:50]:
-                            st.text(err)
+                col_a, col_b = st.columns(2)
+                with col_a:
+                    st.text_input("Titre", value=book_info["title"], key="found_title", disabled=True)
+                    st.text_input("Auteur", value=book_info["authors"], key="found_author", disabled=True)
+                with col_b:
+                    st.text_input("Éditeur", value=book_info["publisher"], key="found_pub", disabled=True)
+                    st.text_input("Année", value=book_info["year"], key="found_year", disabled=True)
                 
-                st.rerun()
-                
+                # Formulaire pour ajouter à la base
+                with st.form("add_scanned_book"):
+                    st.markdown("### ➕ Ajouter à ma bibliothèque")
+                    
+                    col1, col2, col3 = st.columns(3)
+                    
+                    with col1:
+                        owner_scan = st.selectbox("Propriétaire", ["Axel", "Carole", "Nils"], key="scan_owner")
+                    with col2:
+                        format_scan = st.selectbox("Format", ["Livre", "BD", "Manga", "Comics"], key="scan_format")
+                    with col3:
+                        lang_scan = st.text_input("Langue", value=book_info["language"], key="scan_lang")
+                    
+                    add_scan = st.form_submit_button("➕ Ajouter ce livre", type="primary", use_container_width=True)
+                    
+                    if add_scan:
+                        try:
+                            conn = get_conn()
+                            conn.execute("""
+                                INSERT INTO books (owner, format, author, title, language, isbn, publisher, year)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """, (
+                                owner_scan,
+                                format_scan,
+                                book_info["authors"],
+                                book_info["title"],
+                                lang_scan,
+                                book_info["isbn"],
+                                book_info["publisher"],
+                                int(book_info["year"]) if book_info["year"].isdigit() else None
+                            ))
+                            conn.commit()
+                            conn.close()
+                            
+                            st.success(f"✅ Livre ajouté : {book_info['title']}")
+                            st.rerun()
+                        except Exception as e:
+                            st.error(f"❌ Erreur : {e}")
+            else:
+                st.warning("⚠️ Livre non trouvé dans les bases de données")
+                st.info("💡 Vous pouvez l'ajouter manuellement dans l'onglet 'Ajout manuel'")
+
+# ==============================
+# TAB 3 - RECHERCHE
+# ==============================
+with tab3:
+    st.markdown("## 🔍 Rechercher dans la bibliothèque")
+    
+    c1, c2, c3 = st.columns(3)
+    
+    with c1:
+        search_text = st.text_input("🔎 Recherche", placeholder="Titre ou auteur...")
+    with c2:
+        filter_owner = st.selectbox("Propriétaire", ["TOUS", "Axel", "Carole", "Nils"])
+    with c3:
+        filter_format = st.selectbox("Format", ["TOUS", "Livre", "BD", "Manga", "Comics"])
+    
+    try:
+        conn = get_conn()
+        
+        query = "SELECT owner, format, author, title, language, year, publisher FROM books WHERE 1=1"
+        params = []
+        
+        if search_text:
+            query += " AND (title LIKE ? OR author LIKE ?)"
+            params += [f"%{search_text}%", f"%{search_text}%"]
+        
+        if filter_owner != "TOUS":
+            query += " AND owner = ?"
+            params.append(filter_owner)
+        
+        if filter_format != "TOUS":
+            query += " AND format = ?"
+            params.append(filter_format)
+        
+        query += " ORDER BY owner, author, title"
+        
+        rows = conn.execute(query, params).fetchall()
+        conn.close()
+        
+        if rows:
+            df = pd.DataFrame(rows, columns=["Proprio", "Format", "Auteur", "Titre", "Langue", "Année", "Éditeur"])
+            st.success(f"📚 {len(df)} résultat(s)")
+            st.dataframe(df, use_container_width=True, height=500, hide_index=True)
+        else:
+            st.info("📭 Aucun résultat")
+            
     except Exception as e:
         st.error(f"❌ Erreur : {e}")
-        import traceback
-        with st.expander("Détails"):
-            st.code(traceback.format_exc())
 
 # ==============================
-# RECHERCHE
+# TAB 4 - LISTE COMPLÈTE
 # ==============================
-st.divider()
-st.markdown("## 🔍 Recherche")
-
-c1, c2, c3 = st.columns(3)
-
-with c1:
-    search = st.text_input("Titre ou Auteur")
-
-with c2:
-    owner_f = st.selectbox("Propriétaire", ["TOUS", "Axel", "Carole", "Nils"])
-
-with c3:
-    format_f = st.selectbox("Format", ["TOUS", "Livre", "BD"])
-
-try:
-    conn = get_conn()
+with tab4:
+    st.markdown("## 📊 Liste complète")
     
-    query = """
-    SELECT owner, format, author, title, language
-    FROM books
-    WHERE 1=1
-    """
-    params = []
-
-    if search:
-        query += " AND (title LIKE ? OR author LIKE ?)"
-        params += [f"%{search}%", f"%{search}%"]
-
-    if owner_f != "TOUS":
-        query += " AND owner = ?"
-        params.append(owner_f)
-
-    if format_f != "TOUS":
-        query += " AND format = ?"
-        params.append(format_f)
-
-    query += " ORDER BY owner, format, author, title"
-
-    rows = conn.execute(query, params).fetchall()
-    conn.close()
-
-    if rows:
-        df_result = pd.DataFrame(rows, columns=[
-            "Propriétaire", "Format", "Auteur", "Titre", "Langue"
-        ])
-        st.success(f"📚 {len(df_result)} résultat(s)")
-        st.dataframe(df_result, use_container_width=True, height=500, hide_index=True)
-    else:
-        st.info("📭 Aucun résultat")
+    try:
+        conn = get_conn()
+        rows = conn.execute("""
+            SELECT owner, format, author, title, language, year, publisher, created_at
+            FROM books
+            ORDER BY created_at DESC
+        """).fetchall()
+        conn.close()
         
-except Exception as e:
-    st.error(f"❌ Erreur : {e}")
+        if rows:
+            df = pd.DataFrame(rows, columns=[
+                "Proprio", "Format", "Auteur", "Titre", "Langue", "Année", "Éditeur", "Ajouté le"
+            ])
+            
+            st.success(f"📚 {len(df)} livre(s) dans la bibliothèque")
+            
+            # Option d'export
+            csv = df.to_csv(index=False).encode('utf-8')
+            st.download_button(
+                label="📥 Télécharger en CSV",
+                data=csv,
+                file_name="ma_bibliotheque.csv",
+                mime="text/csv"
+            )
+            
+            st.dataframe(df, use_container_width=True, height=600, hide_index=True)
+        else:
+            st.info("📭 La bibliothèque est vide")
+            
+    except Exception as e:
+        st.error(f"❌ Erreur : {e}")
