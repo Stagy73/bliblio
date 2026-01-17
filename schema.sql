@@ -1,14 +1,12 @@
-DROP TABLE IF EXISTS books;
-
-CREATE TABLE books (
+CREATE TABLE IF NOT EXISTS books (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner TEXT NOT NULL,
-    category TEXT NOT NULL,
-    author TEXT NOT NULL,
-    title TEXT NOT NULL,
+    owner TEXT,
+    category TEXT,
+    author TEXT,
+    title TEXT,
     language TEXT,
-    read INTEGER DEFAULT 0,
-    kept INTEGER DEFAULT 0,
+    read INTEGER,
+    kept INTEGER,
     publisher TEXT,
-    UNIQUE(owner, category, author, title)
+    UNIQUE(owner, author, title)
 );

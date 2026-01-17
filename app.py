@@ -44,21 +44,34 @@ def to_bool(v):
 # UI – IMPORT
 # ==============================
 st.title("📚 Bibliothèque personnelle")
-st.markdown("## 📥 Import du fichier Excel")
+st.markdown("## 📥 Import Excel (onglet normalisé uniquement)")
 
 uploaded = st.file_uploader(
-    "Uploader le fichier Solde compte.xls / xlsx",
-    type=["xls", "xlsx"]
+    "Uploader le fichier Solde compte.xlsx",
+    type=["xlsx"]
 )
 
 if uploaded:
     xls = pd.ExcelFile(uploaded)
-    sheet = st.selectbox("Choisir l’onglet", xls.sheet_names)
-    category = st.selectbox("Type de contenu", ["Livre", "BD"])
+    sheet = st.selectbox("Choisir l’onglet à importer", xls.sheet_names)
     wipe = st.checkbox("🗑️ Vider la base avant import")
 
     if st.button("🚀 Importer cet onglet"):
         df = pd.read_excel(xls, sheet_name=sheet)
+
+        REQUIRED = [
+            "Proprio",
+            "Auteur",
+            "Titre",
+            "Eng, Fr",
+            "Lu",
+            "Gardé après lecture",
+            "Edition (scolaires)"
+        ]
+
+        if not set(REQUIRED).issubset(df.columns):
+            st.error("❌ Onglet NON conforme.\nUtilise uniquement l’onglet normalisé.")
+            st.stop()
 
         conn = get_conn()
         cur = conn.cursor()
@@ -69,83 +82,76 @@ if uploaded:
 
         inserted = 0
 
-        # ==============================
-        # LIVRES (onglet NORMALISÉ)
-        # ==============================
-        if category == "Livre":
-            REQUIRED = {
-                "Proprio", "Auteur", "Titre",
-                "Eng, Fr", "Lu", "Gardé après lecture", "Edition (scolaires)"
-            }
+        for _, r in df.iterrows():
+            owner = clean(r["Proprio"])
+            author = clean(r["Auteur"])
+            title = clean(r["Titre"])
 
-            if not REQUIRED.issubset(df.columns):
-                st.error("❌ Colonnes manquantes dans l’onglet Livre")
-                st.stop()
+            if not owner or not author or not title:
+                continue
 
-            for _, r in df.iterrows():
-                owner = clean(r["Proprio"])
-                author = clean(r["Auteur"])
-                title = clean(r["Titre"])
+            cur.execute("""
+                INSERT OR IGNORE INTO books
+                (owner, category, author, title, language, read, kept, publisher)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """, (
+                owner,
+                "Livre",
+                author,
+                title,
+                clean(r["Eng, Fr"]),
+                to_bool(r["Lu"]),
+                to_bool(r["Gardé après lecture"]),
+                clean(r["Edition (scolaires)"])
+            ))
 
-                if not owner or not author or not title:
-                    continue
-
-                cur.execute("""
-                    INSERT OR IGNORE INTO books
-                    (owner, category, author, title, language, read, kept, publisher)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    owner,
-                    "Livre",
-                    author,
-                    title,
-                    clean(r["Eng, Fr"]),
-                    to_bool(r["Lu"]),
-                    to_bool(r["Gardé après lecture"]),
-                    clean(r["Edition (scolaires)"])
-                ))
-
-                inserted += cur.rowcount
-
-        # ==============================
-        # BD
-        # ==============================
-        else:
-            if not {"Auteur", "Titre"}.issubset(df.columns):
-                st.error("❌ Colonnes Auteur / Titre manquantes pour BD")
-                st.stop()
-
-            for _, r in df.iterrows():
-                author = clean(r["Auteur"])
-                title = clean(r["Titre"])
-
-                if not author or not title:
-                    continue
-
-                cur.execute("""
-                    INSERT OR IGNORE INTO books
-                    (owner, category, author, title)
-                    VALUES (?, ?, ?, ?)
-                """, ("BD", "BD", author, title))
-
-                inserted += cur.rowcount
+            inserted += cur.rowcount
 
         conn.commit()
         conn.close()
 
-        st.success(f"✅ Import terminé : {inserted} lignes ajoutées")
+        st.success(f"✅ Import terminé : {inserted} livres ajoutés")
 
 # ==============================
-# AFFICHAGE
+# RECHERCHE
 # ==============================
 st.divider()
+st.markdown("## 🔍 Recherche")
+
+c1, c2, c3 = st.columns(3)
+
+with c1:
+    search = st.text_input("Titre ou Auteur")
+
+with c2:
+    owner = st.selectbox("Propriétaire", ["TOUS", "Carole", "Nils", "Axel"])
+
+with c3:
+    category = st.selectbox("Type", ["TOUS", "Livre", "BD"])
+
+query = """
+SELECT owner, category, author, title, language, read, kept, publisher
+FROM books
+WHERE 1=1
+"""
+params = []
+
+if search:
+    query += " AND (title LIKE ? OR author LIKE ?)"
+    params += [f"%{search}%", f"%{search}%"]
+
+if owner != "TOUS":
+    query += " AND owner = ?"
+    params.append(owner)
+
+if category != "TOUS":
+    query += " AND category = ?"
+    params.append(category)
+
+query += " ORDER BY owner, author, title"
 
 conn = get_conn()
-rows = conn.execute("""
-    SELECT owner, category, author, title, language, read, kept, publisher
-    FROM books
-    ORDER BY owner, category, author, title
-""").fetchall()
+rows = conn.execute(query, params).fetchall()
 conn.close()
 
 if rows:
@@ -157,4 +163,4 @@ if rows:
     df["Gardé"] = df["Gardé"].apply(lambda x: "✓" if x else "")
     st.dataframe(df, use_container_width=True, height=650)
 else:
-    st.info("📭 Base vide")
+    st.info("📭 Aucun livre trouvé")
