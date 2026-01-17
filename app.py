@@ -10,6 +10,8 @@ import math
 
 BASE_DIR = Path(__file__).parent
 DATA_DIR = BASE_DIR / "data"
+DATA_DIR.mkdir(exist_ok=True)
+
 DB_PATH = DATA_DIR / "books.sqlite"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
 
@@ -23,11 +25,9 @@ st.set_page_config(
 # ==============================
 
 def get_conn():
-    DATA_DIR.mkdir(exist_ok=True)
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
     conn.row_factory = sqlite3.Row
     return conn
-
 
 def init_schema():
     conn = get_conn()
@@ -36,33 +36,39 @@ def init_schema():
     conn.commit()
     conn.close()
 
-
 init_schema()
 
 # ==============================
 # UTILS
 # ==============================
 
+def clean_str(val):
+    if val is None:
+        return ""
+    if isinstance(val, float) and math.isnan(val):
+        return ""
+    return str(val).strip()
+
 def to_bool(val):
-    """Convertit proprement Excel → bool"""
     if val is True:
         return True
     if val is False:
         return False
-    if val is None or (isinstance(val, float) and math.isnan(val)):
+    if val is None:
+        return False
+    if isinstance(val, float) and math.isnan(val):
         return False
     return str(val).strip().lower() in ("true", "1", "yes", "x")
 
 # ==============================
-# UI
+# UI — IMPORT
 # ==============================
 
 st.title("📚 Bibliothèque personnelle")
-
-st.markdown("## 📥 Importer la bibliothèque")
+st.subheader("📥 Importer la bibliothèque Excel")
 
 uploaded = st.file_uploader(
-    "Importer le fichier Excel (livre.xlsx)",
+    "Importer le fichier livre.xlsx",
     type=["xlsx"]
 )
 
@@ -79,7 +85,7 @@ if uploaded and st.button("🚀 Lancer l'import"):
 
         df = pd.read_excel(uploaded, header=0)
 
-        # blocs colonnes EXACTS du fichier réel
+        # BLOCS EXACTS DU FICHIER
         BLOCKS = {
             "CAROLE": (0, 7),
             "NILS":   (7, 14),
@@ -90,14 +96,16 @@ if uploaded and st.button("🚀 Lancer l'import"):
 
         for owner, (start, end) in BLOCKS.items():
             sub = df.iloc[:, start:end].copy()
+
+            # sécurise les colonnes
             sub.columns = [
                 "Auteur", "Titre", "Langue",
-                "Lu", "Garde", "Edition", "_"
+                "Lu", "Garde", "Edition", "_junk"
             ]
 
             for _, row in sub.iterrows():
-                title = str(row["Titre"]).strip()
-                if not title or title.lower() == "nan":
+                title = clean_str(row["Titre"])
+                if not title:
                     continue
 
                 cur.execute("""
@@ -106,10 +114,10 @@ if uploaded and st.button("🚀 Lancer l'import"):
                     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     owner,
-                    str(row["Auteur"]).strip(),
+                    clean_str(row["Auteur"]),
                     title,
-                    str(row["Edition"]).strip(),
-                    str(row["Langue"]).strip(),
+                    clean_str(row["Edition"]),
+                    clean_str(row["Langue"]),
                     "Livre",
                     to_bool(row["Lu"]),
                     to_bool(row["Garde"])
