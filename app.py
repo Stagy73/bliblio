@@ -11,7 +11,7 @@ DATA_DIR = BASE_DIR / "data"
 DB_PATH = DATA_DIR / "books.sqlite"
 SCHEMA_PATH = BASE_DIR / "schema.sql"
 
-st.set_page_config(page_title="📚 Bibliothèque personnelle", layout="wide")
+st.set_page_config("📚 Bibliothèque personnelle", layout="wide")
 
 # ==============================
 # DB
@@ -53,7 +53,7 @@ uploaded = st.file_uploader(
 
 if uploaded:
     xls = pd.ExcelFile(uploaded)
-    sheet = st.selectbox("Choisir l’onglet à importer", xls.sheet_names)
+    sheet = st.selectbox("Choisir l’onglet", xls.sheet_names)
     category = st.selectbox("Type de contenu", ["Livre", "BD"])
     wipe = st.checkbox("🗑️ Vider la base avant import")
 
@@ -70,82 +70,76 @@ if uploaded:
         inserted = 0
 
         # ==============================
-        # BD  (onglet BD)
-        # Colonnes attendues :
-        # A = Auteur | B = Titre
+        # LIVRES (onglet NORMALISÉ)
         # ==============================
-        if category == "BD":
-            for _, r in df.iterrows():
-                auteur = clean(r.iloc[0])
-                titre = clean(r.iloc[1])
+        if category == "Livre":
+            REQUIRED = {
+                "Proprio", "Auteur", "Titre",
+                "Eng, Fr", "Lu", "Gardé après lecture", "Edition (scolaires)"
+            }
 
-                if not auteur or not titre:
+            if not REQUIRED.issubset(df.columns):
+                st.error("❌ Colonnes manquantes dans l’onglet Livre")
+                st.stop()
+
+            for _, r in df.iterrows():
+                owner = clean(r["Proprio"])
+                author = clean(r["Auteur"])
+                title = clean(r["Titre"])
+
+                if not owner or not author or not title:
+                    continue
+
+                cur.execute("""
+                    INSERT OR IGNORE INTO books
+                    (owner, category, author, title, language, read, kept, publisher)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """, (
+                    owner,
+                    "Livre",
+                    author,
+                    title,
+                    clean(r["Eng, Fr"]),
+                    to_bool(r["Lu"]),
+                    to_bool(r["Gardé après lecture"]),
+                    clean(r["Edition (scolaires)"])
+                ))
+
+                inserted += cur.rowcount
+
+        # ==============================
+        # BD
+        # ==============================
+        else:
+            if not {"Auteur", "Titre"}.issubset(df.columns):
+                st.error("❌ Colonnes Auteur / Titre manquantes pour BD")
+                st.stop()
+
+            for _, r in df.iterrows():
+                author = clean(r["Auteur"])
+                title = clean(r["Titre"])
+
+                if not author or not title:
                     continue
 
                 cur.execute("""
                     INSERT OR IGNORE INTO books
                     (owner, category, author, title)
                     VALUES (?, ?, ?, ?)
-                """, ("BD", "BD", auteur, titre))
+                """, ("BD", "BD", author, title))
 
                 inserted += cur.rowcount
-
-        # ==============================
-        # LIVRES (onglet Livres)
-        # STRUCTURE EXACTE :
-        # CAROLE : Auteur | Titre | Eng,Fr | Lu | Gardé | Edition
-        # NILS   : Auteur | Titre | Eng,Fr
-        # AXEL   : Auteur | Titre | Eng,Fr
-        # ==============================
-        else:
-            blocks = {
-                "CAROLE": (0, 6),
-                "NILS":   (6, 9),
-                "AXEL":   (9, 12)
-            }
-
-            for owner, (start, end) in blocks.items():
-                sub = df.iloc[:, start:end].copy()
-
-                if owner == "CAROLE":
-                    sub.columns = ["Auteur", "Titre", "Langue", "Lu", "Garde", "Edition"]
-                else:
-                    sub.columns = ["Auteur", "Titre", "Langue"]
-
-                for _, r in sub.iterrows():
-                    auteur = clean(r["Auteur"])
-                    titre = clean(r["Titre"])
-
-                    if not auteur or not titre:
-                        continue
-
-                    cur.execute("""
-                        INSERT OR IGNORE INTO books
-                        (owner, category, author, title, language, read, kept, publisher)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                    """, (
-                        owner,
-                        "Livre",
-                        auteur,
-                        titre,
-                        clean(r.get("Langue", "")),
-                        to_bool(r.get("Lu", False)),
-                        to_bool(r.get("Garde", False)),
-                        clean(r.get("Edition", ""))
-                    ))
-
-                    inserted += cur.rowcount
 
         conn.commit()
         conn.close()
 
-        st.success(f"✅ Import terminé : {inserted} entrées ajoutées")
-
-st.divider()
+        st.success(f"✅ Import terminé : {inserted} lignes ajoutées")
 
 # ==============================
 # AFFICHAGE
 # ==============================
+st.divider()
+
 conn = get_conn()
 rows = conn.execute("""
     SELECT owner, category, author, title, language, read, kept, publisher

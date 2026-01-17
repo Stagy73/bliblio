@@ -2,8 +2,8 @@ DROP TABLE IF EXISTS books;
 
 CREATE TABLE books (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    owner TEXT,              -- CAROLE | NILS | AXEL | BD
-    category TEXT,           -- Livre | BD
+    owner TEXT NOT NULL,
+    category TEXT NOT NULL,
     author TEXT NOT NULL,
     title TEXT NOT NULL,
     language TEXT,
